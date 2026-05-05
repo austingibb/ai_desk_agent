@@ -104,12 +104,9 @@ class Orchestrator:
         nudged = False
 
         while self.running:
-            local_tools = TOOL_DEFINITIONS if tool_call_count < MAX_TOOL_CALLS_PER_TURN else None
-            if local_tools is None:
-                print("[SAFETY] Tool call limit reached, forcing text-only response")
-            tools = local_tools
-            if local_tools is not None and self.mcp_tools:
-                tools = local_tools.copy()
+            tools = TOOL_DEFINITIONS
+            if self.mcp_tools:
+                tools = TOOL_DEFINITIONS.copy()
                 tools.extend(self.mcp_tools)
 
             with self.ctx_lock:

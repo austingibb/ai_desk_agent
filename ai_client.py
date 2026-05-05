@@ -11,6 +11,14 @@ from config import (
     LLM_TIMEOUT,
 )
 
+# Gemma4 can leak control tokens like <|"|> into output
+_TOKEN_JUNK_RE = re.compile(r"<\|[\"']{1,3}\|?>")
+
+
+def _clean(text: str) -> str:
+    return _TOKEN_JUNK_RE.sub("", text).strip()
+
+
 # Gemma4 on llama.cpp sometimes outputs tool calls as inline text
 # e.g. <|tool_call>call:wait{seconds:600}<tool_call|>
 INLINE_TOOL_RE = re.compile(
@@ -84,7 +92,7 @@ class AIClient:
                 "arguments": args,
             })
 
-        content = (msg.get("content") or "").strip()
+        content = _clean(msg.get("content") or "")
 
         if not tool_calls:
             for m in INLINE_TOOL_RE.finditer(content):
@@ -96,7 +104,12 @@ class AIClient:
                     "arguments": args,
                 })
             if tool_calls:
-                content = INLINE_TOOL_RE.sub("", content).strip()
+                content = _clean(INLINE_TOOL_RE.sub("", content))
+
+        for tc in tool_calls:
+            for k, v in tc["arguments"].items():
+                if isinstance(v, str):
+                    tc["arguments"][k] = _clean(v)
 
         return {
             "content": content,
