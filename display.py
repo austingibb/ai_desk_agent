@@ -1,5 +1,6 @@
 """E-ink display driver for Adafruit SSD1680Z (122x250, SPI)."""
 
+import time
 import digitalio
 import busio
 import board
@@ -7,6 +8,8 @@ from PIL import Image, ImageDraw, ImageFont
 from adafruit_epd.ssd1680 import Adafruit_SSD1680Z
 from adafruit_epd.epd import Adafruit_EPD
 from config import DISPLAY_WIDTH, DISPLAY_HEIGHT, ROTATION, FONT_BOLD, FONT_REGULAR
+
+MIN_REFRESH_INTERVAL = 10  # seconds between e-ink refreshes
 
 
 class Display:
@@ -39,6 +42,7 @@ class Display:
 
         self.WHITE = (255, 255, 255)
         self.BLACK = (0, 0, 0)
+        self._last_refresh = 0
 
     def _load_font(self, path: str, size: int) -> ImageFont.FreeTypeFont:
         try:
@@ -64,6 +68,13 @@ class Display:
         return lines if lines else [text]
 
     def show_text(self, text: str, question: str = None):
+        # Guard against too-rapid refreshes which can lock up e-ink
+        elapsed = time.monotonic() - self._last_refresh
+        if elapsed < MIN_REFRESH_INTERVAL:
+            wait = MIN_REFRESH_INTERVAL - elapsed
+            print(f"[DISPLAY] Waiting {wait:.1f}s for e-ink cooldown")
+            time.sleep(wait)
+
         self.epd.fill(Adafruit_EPD.WHITE)
         image = Image.new("RGB", (self.width, self.height), color=self.WHITE)
         draw = ImageDraw.Draw(image)
@@ -87,6 +98,9 @@ class Display:
 
         self.epd.image(image)
         self.epd.display()
+        self._last_refresh = time.monotonic()
+        print(f"[DISPLAY] Refreshed: '{text[:50]}'")
+
 
     def show_booting(self):
         self.show_text("Waking up...")
