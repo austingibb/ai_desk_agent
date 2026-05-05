@@ -151,6 +151,8 @@ class Orchestrator:
                 result = self.ai.consolidate(observations, previous)
                 display_text = result.get("display_text", "")
                 question = result.get("question", "")
+                print(f"[PARSE] display_text='{display_text[:50]}' question='{question}'")
+            else:
             else:
                 messages = self.ctx.build_request_data(photo_uri, CAMERA_WIDTH, CAMERA_HEIGHT)
                 result = self.ai.reason_about_photo(messages)
@@ -177,9 +179,7 @@ class Orchestrator:
         self._send_to_display(display_text, question)
 
     def _send_to_display(self, display_text: str, question: str):
-        print(f"[DISPLAY] '{display_text[:80]}...'")
-        if question:
-            print(f"[DISPLAY] Question: {question}")
+        print(f"[SEND] text='{display_text[:60]}'  question='{question}'")
 
         success = http_post("/display", {"text": display_text, "question": question}, timeout=10)
         if not success:
