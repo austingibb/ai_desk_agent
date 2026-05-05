@@ -137,8 +137,10 @@ class Orchestrator:
                 self.ctx.add_assistant(response)
 
             if response["reasoning"]:
+                print(f"[REASONING] {response['reasoning'][:200]}...")
                 log(f"[REASONING] {response['reasoning']}")
             if response["content"]:
+                print(f"[AI] {response['content'][:200]}")
                 log(f"[AI] {response['content']}")
 
             if not response["tool_calls"]:
@@ -157,6 +159,7 @@ class Orchestrator:
                 last_tool_name = tc["name"]
                 print(f"[TOOL] {tc['name']}({tc['arguments']})")
                 result = self._execute_tool(tc["name"], tc["arguments"])
+                print(f"[TOOL RESULT] {json.dumps(result)[:200]}")
                 log(f"[TOOL RESULT] {json.dumps(result)}")
                 with self.ctx_lock:
                     self.ctx.add_tool_result(tc["id"], tc["name"], result)
