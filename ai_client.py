@@ -53,6 +53,7 @@ class AIClient:
             "messages": messages,
             "max_tokens": LLM_MAX_TOKENS,
             "temperature": 0.7,
+            "enable_thinking": False,
         }
         if tools:
             payload["tools"] = tools
@@ -111,6 +112,7 @@ class AIClient:
             "messages": messages,
             "max_tokens": LLM_MAX_TOKENS_COMPACT,
             "temperature": 0.3,
+            "enable_thinking": False,
         }
         resp = requests.post(
             f"{self.base_url}/chat/completions",
