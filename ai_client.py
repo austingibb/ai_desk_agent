@@ -53,7 +53,6 @@ class AIClient:
             "messages": messages,
             "max_tokens": LLM_MAX_TOKENS,
             "temperature": 0.7,
-            "enable_thinking": False,
         }
         if tools:
             payload["tools"] = tools
@@ -63,7 +62,10 @@ class AIClient:
             json=payload,
             timeout=LLM_TIMEOUT,
         )
-        resp.raise_for_status()
+        if not resp.ok:
+            body = resp.text[:500]
+            print(f"[LLM] {resp.status_code} error: {body}")
+            resp.raise_for_status()
         data = resp.json()
         choice = data["choices"][0]
         msg = choice.get("message", {})
@@ -112,7 +114,6 @@ class AIClient:
             "messages": messages,
             "max_tokens": LLM_MAX_TOKENS_COMPACT,
             "temperature": 0.3,
-            "enable_thinking": False,
         }
         resp = requests.post(
             f"{self.base_url}/chat/completions",

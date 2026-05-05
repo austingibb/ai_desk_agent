@@ -120,8 +120,10 @@ class Orchestrator:
                 response = self.ai.chat_with_tools(messages, tools)
             except Exception as e:
                 print(f"[LLM] Error: {e}")
+                with self.ctx_lock:
+                    self.ctx.add_user("Something went wrong. Continue the rhythm — what's your next action?")
                 time.sleep(5)
-                return
+                continue
 
             with self.ctx_lock:
                 self.ctx.add_assistant(response)
