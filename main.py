@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AI E-Ink Roommate — main orchestrator. Runs on Pi 5 (192.168.0.39)."""
+"""AI E-Ink Roommate — agent loop orchestrator. Runs on Pi 5 (192.168.0.39)."""
 
 import time
 import signal
@@ -9,9 +9,13 @@ import requests
 from config import (
     DISPLAY_SERVER_URL,
     SYSTEM_PROMPT,
-    PHOTO_INTERVAL,
-    DISPLAY_UPDATE_INTERVAL,
-    BUTTON_RESPONSE_TIMEOUT,
+    TOOL_DEFINITIONS,
+    MAX_TOOL_CALLS_PER_TURN,
+    MIN_PHOTO_INTERVAL,
+    MIN_DISPLAY_INTERVAL,
+    MAX_WAIT_SECONDS,
+    IDLE_TIMEOUT,
+    BUTTON_CHECK_INTERVAL,
     CAMERA_WIDTH,
     CAMERA_HEIGHT,
 )
@@ -42,17 +46,11 @@ def http_post(path: str, data: dict, timeout: int = 5):
 class Orchestrator:
     def __init__(self):
         self.ctx = Context()
-        self.ctx.add_system(SYSTEM_PROMPT)
-
-        print("Init camera...")
         self.camera = Camera()
-
-        print("Init AI client...")
         self.ai = AIClient()
-
-        self.last_photo_time = 0
-        self.cooldown_until = time.monotonic()
         self.running = True
+        self.last_photo_time = 0
+        self.last_display_time = 0
 
         signal.signal(signal.SIGINT, self._handle_signal)
         signal.signal(signal.SIGTERM, self._handle_signal)
@@ -61,159 +59,141 @@ class Orchestrator:
         print("\nShutting down...")
         self.running = False
 
-    def _cooldown_passed(self) -> bool:
-        return time.monotonic() >= self.cooldown_until
-
-    def _set_cooldown(self, seconds: float):
-        self.cooldown_until = time.monotonic() + seconds
-
     def run(self):
-        print("Entering main loop.")
+        print("Init camera...")
+        print("Init AI client...")
+        self.ctx.add_system(SYSTEM_PROMPT)
+        self.ctx.add_user("You've just been powered on. Use take_photo to see the room for the first time.")
+        print("Entering agent loop.")
+
         while self.running:
             try:
-                self._tick()
+                self._turn()
             except Exception as e:
-                print(f"Error: {e}")
+                print(f"[ERROR] {e}")
                 time.sleep(5)
+
         self.cleanup()
 
-    def _tick(self):
-        now = time.monotonic()
+    def _turn(self):
+        tool_call_count = 0
 
-        # Check for button press on display server
-        result = http_get("/buttons/check", timeout=2)
-        if result.get("pressed"):
-            print(f"[BUTTON] Pressed ({result.get('button')}) — forcing display update...")
-            self._force_display_update()
-            return
+        while self.running:
+            tools = TOOL_DEFINITIONS if tool_call_count < MAX_TOOL_CALLS_PER_TURN else None
+            if tools is None:
+                print("[SAFETY] Tool call limit reached, forcing text-only response")
 
-        # Time for a photo?
-        if now - self.last_photo_time >= PHOTO_INTERVAL:
-            self._photo_cycle(now)
-
-        time.sleep(4)
-
-    def _photo_cycle(self, now: float):
-        self.last_photo_time = now
-
-        print("[PHOTO] Capturing...")
-        try:
-            _, photo_uri = self.camera.capture()
-        except Exception as e:
-            print(f"[PHOTO] Camera error: {e}")
-            return
-
-        messages = self.ctx.build_request_data(photo_uri, CAMERA_WIDTH, CAMERA_HEIGHT)
-        print(f"[CONTEXT] {len(self.ctx.messages)} msgs, ~{self.ctx.total_tokens()} tokens")
-        obs = self.ctx.get_window_text()
-        if obs:
-            print(f"[OBSERVATIONS]\n{obs}\n---")
-        for i, msg in enumerate(messages):
-            c = msg.get("content", "")
-            if isinstance(c, list):
-                for part in c:
-                    if part.get("type") == "text":
-                        print(f"[PROMPT msg {i}]\n{part['text'][:2000]}")
-                    elif part.get("type") == "image_url":
-                        print(f"[PROMPT msg {i}] <image {CAMERA_WIDTH}x{CAMERA_HEIGHT}>")
-            elif isinstance(c, str):
-                print(f"[PROMPT msg {i}]\n{c[:500]}")
-        print(f"[AI] Sending to {self.ai.model}...", flush=True)
-        try:
-            result = self.ai.reason_about_photo(messages)
-        except Exception as e:
-            print(f"[AI] API error: {e}")
-            return
-
-        if result.get("reasoning"):
-            self.ctx.add_reasoning(result["reasoning"])
-            print(f"[AI] Reasoning: {result['reasoning'][:120]}...")
-
-        if result.get("should_display"):
-            if not self._cooldown_passed():
-                remaining = int(self.cooldown_until - now)
-                print(f"[DISPLAY] AI wants to update but cooldown: {remaining}s remaining")
-            else:
-                self._do_display_update(result)
-
-        self.ctx.check_compact(self.ai)
-
-    def _force_display_update(self):
-        try:
-            _, photo_uri = self.camera.capture()
-            observations = self.ctx.get_window_text()
-            previous = self.ctx.get_previous_display()
-
-            display_text = ""
-            question = ""
-
-            if observations.strip():
-                result = self.ai.consolidate(observations, previous)
-                display_text = result.get("display_text", "")
-                question = result.get("question", "")
-                print(f"[PARSE] display_text='{display_text[:50]}' question='{question}'")
-            else:
-                messages = self.ctx.build_request_data(photo_uri, CAMERA_WIDTH, CAMERA_HEIGHT)
-                result = self.ai.reason_about_photo(messages)
-                if result.get("reasoning"):
-                    self.ctx.add_reasoning(result["reasoning"])
-                display_text = result.get("display_text") or result.get("reasoning", "")[:200]
-                question = result.get("question", "")
-
-            if not display_text.strip():
-                # Fallback: use last reasoning observation as display text
-                obs_lines = observations.strip().split("\n")
-                if obs_lines:
-                    display_text = obs_lines[-1].strip()[:200]
-                else:
-                    display_text = "..."
-
-            self._send_to_display(display_text, question)
-
-        except Exception as e:
-            print(f"[FORCE] Error: {e}")
-
-    def _do_display_update(self, result: dict):
-        display_text = result.get("display_text", "").strip()
-        question = result.get("question", "").strip()
-        wait_seconds = result.get("wait_seconds", 10)
-
-        if not display_text and not question:
-            # AI said DISPLAY: yes but gave no MESSAGE — use reasoning snippet
-            reasoning = result.get("reasoning", "")
-            if reasoning:
-                display_text = reasoning[:200]
-            else:
+            print(f"[LLM] Sending {len(self.ctx.get_messages())} messages (~{self.ctx.total_tokens()} tokens)...")
+            try:
+                response = self.ai.chat_with_tools(self.ctx.get_messages(), tools)
+            except Exception as e:
+                print(f"[LLM] Error: {e}")
+                time.sleep(5)
                 return
 
-        self._send_to_display(display_text, question, wait_seconds)
+            self.ctx.add_assistant(response)
 
-    def _send_to_display(self, display_text: str, question: str, wait_seconds: int = 10):
-        print(f"[SEND] text='{display_text[:60]}'  question='{question}'  wait={wait_seconds}s")
+            if response["reasoning"]:
+                print(f"[REASONING] {response['reasoning'][:200]}...")
+            if response["content"]:
+                print(f"[AI] {response['content'][:200]}")
 
-        success = http_post("/display", {"text": display_text, "question": question}, timeout=10)
-        if not success:
-            print("[DISPLAY] Failed to send to display server")
-            self._set_cooldown(DISPLAY_UPDATE_INTERVAL)
-            return
+            if not response["tool_calls"]:
+                print("[IDLE] AI produced no tool calls. Waiting...")
+                self._idle_wait()
+                return
 
-        self.ctx.add_display(display_text)
-        self.ctx.close_window(self.ai)
+            for tc in response["tool_calls"]:
+                tool_call_count += 1
+                print(f"[TOOL] {tc['name']}({tc['arguments']})")
+                result = self._execute_tool(tc["name"], tc["arguments"])
+                print(f"[TOOL RESULT] {json.dumps(result)[:200]}")
+                self.ctx.add_tool_result(tc["id"], tc["name"], result)
 
-        if question:
-            self._set_cooldown(DISPLAY_UPDATE_INTERVAL)
-            print(f"[BUTTON] Waiting for response (timeout: {BUTTON_RESPONSE_TIMEOUT}s)...")
-            result = http_get(f"/buttons/wait?timeout={BUTTON_RESPONSE_TIMEOUT}", timeout=BUTTON_RESPONSE_TIMEOUT + 10)
-            answer = result.get("response")
-            if answer:
-                print(f"[BUTTON] User: {answer}")
-                self.ctx.add_button_response(question, answer)
-                self._set_cooldown(0)
-            else:
-                print("[BUTTON] Timed out")
+            self.ctx.check_compact(self.ai)
+
+    def _execute_tool(self, name: str, args: dict) -> dict:
+        if name == "take_photo":
+            return self._tool_take_photo()
+        elif name == "update_display":
+            return self._tool_update_display(args)
+        elif name == "poll_buttons":
+            return self._tool_poll_buttons()
+        elif name == "wait":
+            return self._tool_wait(args)
         else:
-            print(f"[COOLDOWN] Waiting {wait_seconds}s before speaking again")
-            self._set_cooldown(wait_seconds)
+            return {"error": f"Unknown tool: {name}. Available: take_photo, update_display, poll_buttons, wait"}
+
+    def _tool_take_photo(self) -> dict:
+        elapsed = time.monotonic() - self.last_photo_time
+        if elapsed < MIN_PHOTO_INTERVAL:
+            time.sleep(MIN_PHOTO_INTERVAL - elapsed)
+
+        try:
+            _, photo_uri = self.camera.capture()
+        except Exception as e:
+            return {"status": "error", "message": f"Camera error: {e}"}
+
+        self.last_photo_time = time.monotonic()
+        self.ctx.add_image(photo_uri)
+        return {"status": "ok", "description": "Photo captured and added to conversation."}
+
+    def _tool_update_display(self, args: dict) -> dict:
+        text = args.get("text", "")
+        question = args.get("question", "")
+
+        if not text.strip():
+            return {"status": "error", "message": "No text provided"}
+
+        elapsed = time.monotonic() - self.last_display_time
+        if elapsed < MIN_DISPLAY_INTERVAL:
+            time.sleep(MIN_DISPLAY_INTERVAL - elapsed)
+
+        success = http_post("/display", {"text": text, "question": question}, timeout=15)
+        self.last_display_time = time.monotonic()
+
+        http_post("/buttons/reset", {}, timeout=5)
+
+        if success:
+            return {"status": "ok", "message": "Display updated."}
+        else:
+            return {"status": "error", "message": "Failed to communicate with display server"}
+
+    def _tool_poll_buttons(self) -> dict:
+        result = http_get("/buttons/state", timeout=5)
+        button = result.get("button")
+        return {"pressed": button is not None, "button": button}
+
+    def _tool_wait(self, args: dict) -> dict:
+        seconds = max(5, min(MAX_WAIT_SECONDS, args.get("seconds", 60)))
+        print(f"[WAIT] Sleeping {seconds}s...")
+
+        start = time.monotonic()
+        while time.monotonic() - start < seconds:
+            if not self.running:
+                return {"status": "interrupted", "reason": "shutdown", "waited": int(time.monotonic() - start)}
+
+            result = http_get("/buttons/state", timeout=2)
+            if result.get("button"):
+                waited = int(time.monotonic() - start)
+                return {
+                    "status": "interrupted",
+                    "reason": f"Button {result['button']} pressed",
+                    "button": result["button"],
+                    "waited": waited,
+                }
+            time.sleep(BUTTON_CHECK_INTERVAL)
+
+        return {"status": "ok", "waited": seconds}
+
+    def _idle_wait(self):
+        for _ in range(IDLE_TIMEOUT):
+            if not self.running:
+                return
+            time.sleep(1)
+        self.ctx.add_user(
+            "Some time has passed. Use take_photo to see the room, or wait to stay quiet."
+        )
 
     def cleanup(self):
         print("Cleaning up...")
@@ -226,7 +206,10 @@ class Orchestrator:
 
 def main():
     orch = Orchestrator()
-    orch.run()
+    try:
+        orch.run()
+    finally:
+        orch.cleanup()
 
 
 if __name__ == "__main__":

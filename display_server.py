@@ -7,7 +7,7 @@ import signal
 import sys
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from config import BUTTON_RESPONSE_TIMEOUT, PIN_YES, PIN_NO
+from config import PIN_YES, PIN_NO
 
 import gpiod
 from display import Display
@@ -16,6 +16,24 @@ from display import Display
 DISPLAY_LOCK = threading.Lock()
 display = None
 button_request = None
+button_state = {"button": None, "timestamp": None}
+button_state_lock = threading.Lock()
+
+
+def button_monitor_thread():
+    global button_state
+    while True:
+        with button_state_lock:
+            if button_state["button"] is None:
+                if not button_request.get_value(PIN_YES):
+                    button_state["button"] = "YES"
+                    button_state["timestamp"] = time.time()
+                    print(f"[BUTTON] YES pressed")
+                elif not button_request.get_value(PIN_NO):
+                    button_state["button"] = "NO"
+                    button_state["timestamp"] = time.time()
+                    print(f"[BUTTON] NO pressed")
+        time.sleep(0.1)
 
 
 class DisplayHandler(BaseHTTPRequestHandler):
@@ -33,21 +51,19 @@ class DisplayHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
             self._send_json({"status": "ok", "display": display is not None})
-        elif self.path.startswith("/buttons/check"):
+        elif self.path == "/buttons/state":
+            with button_state_lock:
+                self._send_json({
+                    "pressed": button_state["button"] is not None,
+                    "button": button_state["button"],
+                })
+        elif self.path == "/buttons/check":
             if not button_request.get_value(PIN_YES):
                 self._send_json({"pressed": True, "button": "YES"})
             elif not button_request.get_value(PIN_NO):
                 self._send_json({"pressed": True, "button": "NO"})
             else:
                 self._send_json({"pressed": False})
-        elif self.path.startswith("/buttons/wait"):
-            timeout = BUTTON_RESPONSE_TIMEOUT
-            if "?timeout=" in self.path:
-                try:
-                    timeout = float(self.path.split("timeout=")[1].split("&")[0])
-                except ValueError:
-                    pass
-            self._wait_and_respond(timeout)
         else:
             self._send_json({"error": "not found"}, 404)
 
@@ -70,27 +86,20 @@ class DisplayHandler(BaseHTTPRequestHandler):
                     self._send_json({"status": "ok"})
                 except Exception as e:
                     self._send_json({"error": str(e)}, 500)
+        elif self.path == "/buttons/reset":
+            with button_state_lock:
+                button_state["button"] = None
+                button_state["timestamp"] = None
+            self._send_json({"status": "ok"})
         elif self.path == "/shutdown":
             self._send_json({"status": "shutting down"})
             threading.Thread(target=self.server.shutdown).start()
         else:
             self._send_json({"error": "not found"}, 404)
 
-    def _wait_and_respond(self, timeout: float):
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if not button_request.get_value(PIN_YES):
-                self._send_json({"response": "YES"})
-                return
-            if not button_request.get_value(PIN_NO):
-                self._send_json({"response": "NO"})
-                return
-            time.sleep(0.1)
-        self._send_json({"response": None})
-
 
 def init_buttons():
-    global yes_line, no_line, button_request
+    global button_request
     cfg = {}
     for pin in (PIN_YES, PIN_NO):
         cfg[pin] = gpiod.LineSettings(direction=gpiod.line.Direction.INPUT, bias=gpiod.line.Bias.PULL_UP)
@@ -107,6 +116,9 @@ def main():
     print("Display initialized.")
 
     init_buttons()
+
+    t = threading.Thread(target=button_monitor_thread, daemon=True)
+    t.start()
 
     server = HTTPServer(("0.0.0.0", 5050), DisplayHandler)
     print("Display server listening on :5050")

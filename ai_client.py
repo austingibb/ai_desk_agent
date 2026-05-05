@@ -1,17 +1,13 @@
-"""Gemma4 API client — multimodal, reasoning-content support with streaming."""
+"""Gemma4 API client — tool-calling support via llama.cpp OpenAI-compatible endpoint."""
 
 import json
-import sys
 import requests
 from config import (
     LLM_BASE_URL,
     LLM_MODEL,
-    LLM_MAX_TOKENS_REASONING,
-    LLM_MAX_TOKENS_CONSOLIDATE,
+    LLM_MAX_TOKENS,
     LLM_MAX_TOKENS_COMPACT,
     LLM_TIMEOUT,
-    CONSOLIDATE_PROMPT,
-    SYSTEM_PROMPT,
 )
 
 
@@ -19,16 +15,17 @@ class AIClient:
     def __init__(self):
         self.base_url = LLM_BASE_URL.rstrip("/")
         self.model = LLM_MODEL
-        self.system_prompt = SYSTEM_PROMPT
 
-    def _chat(self, messages: list, max_tokens: int, temperature: float = 0.7) -> dict:
+    def chat_with_tools(self, messages: list, tools: list = None) -> dict:
         payload = {
             "model": self.model,
             "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "extra_body": {"reasoning_effort": "low"},
+            "max_tokens": LLM_MAX_TOKENS,
+            "temperature": 0.7,
         }
+        if tools:
+            payload["tools"] = tools
+
         resp = requests.post(
             f"{self.base_url}/chat/completions",
             json=payload,
@@ -38,187 +35,42 @@ class AIClient:
         data = resp.json()
         choice = data["choices"][0]
         msg = choice.get("message", {})
+
+        tool_calls = []
+        for tc in msg.get("tool_calls", []):
+            args = tc["function"]["arguments"]
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except json.JSONDecodeError:
+                    args = {}
+            tool_calls.append({
+                "id": tc.get("id", f"call_{len(tool_calls)}"),
+                "name": tc["function"]["name"],
+                "arguments": args,
+            })
+
         return {
-            "content": msg.get("content", "").strip(),
-            "reasoning": msg.get("reasoning_content", "").strip(),
+            "content": (msg.get("content") or "").strip(),
+            "reasoning": (msg.get("reasoning_content") or "").strip(),
+            "tool_calls": tool_calls,
+            "raw_message": msg,
         }
 
-    def _chat_stream(self, messages: list, max_tokens: int, temperature: float = 0.7):
+    def compact(self, text: str) -> str:
+        messages = [
+            {"role": "user", "content": f"Summarize these observations and interactions concisely, preserving key events and patterns:\n\n{text}"}
+        ]
         payload = {
             "model": self.model,
             "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "stream": True,
-            "extra_body": {"reasoning_effort": "low"},
+            "max_tokens": LLM_MAX_TOKENS_COMPACT,
+            "temperature": 0.3,
         }
         resp = requests.post(
             f"{self.base_url}/chat/completions",
             json=payload,
             timeout=LLM_TIMEOUT,
-            stream=True,
         )
         resp.raise_for_status()
-        return resp
-
-    def _simple_chat(self, user_content: str, system: str = None) -> str:
-        messages = []
-        if system:
-            messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": user_content})
-        result = self._chat(messages, max_tokens=LLM_MAX_TOKENS_COMPACT, temperature=0.3)
-        return result["content"]
-
-    def reason_about_photo(self, messages: list) -> dict:
-        last_content = messages[-1].get("content", "")
-        if isinstance(last_content, list):
-            prompt = next((p["text"] for p in last_content if p.get("type") == "text"), "")
-        else:
-            prompt = last_content
-        has_prior = "Your observations so far this window" in prompt
-
-        if has_prior:
-            instruction = (
-                "You have just received another photo of the room. "
-                "Observe it and add your thoughts. Also consider: do you want to update "
-                "the e-ink display now? If yes, include a display message.\n\n"
-                "Respond with:\n"
-                "REASONING: <your observations and thoughts>\n"
-                "DISPLAY: <yes/no>\n"
-                "MESSAGE: <display text, ~200 chars max, if DISPLAY is yes>\n"
-                "QUESTION: <yes/no question, only if you want to ask one>\n"
-                "WAIT: <seconds before you can speak again, 5-30>"
-            )
-        else:
-            instruction = (
-                "You have received a new photo. "
-                "Observe the room and share your thoughts. You may update the display if you wish.\n\n"
-                "Respond with:\n"
-                "REASONING: <your observations and thoughts>\n"
-                "DISPLAY: <yes/no>\n"
-                "MESSAGE: <display text, ~200 chars max, if DISPLAY is yes>\n"
-                "QUESTION: <yes/no question, only if you want to ask one>\n"
-                "WAIT: <seconds before you can speak again, 5-30>"
-            )
-
-        adjusted = list(messages)
-        adjusted[-2]["content"] += "\n\n" + instruction
-
-        return self._stream_and_parse(adjusted, LLM_MAX_TOKENS_REASONING)
-
-    def consolidate(self, observations: str, previous_display: str) -> dict:
-        prompt = CONSOLIDATE_PROMPT.format(
-            observations=observations, previous_display=previous_display
-        )
-        messages = [{"role": "user", "content": prompt}]
-        return self._stream_and_parse(messages, LLM_MAX_TOKENS_CONSOLIDATE)
-
-    def _stream_and_parse(self, messages: list, max_tokens: int) -> dict:
-        resp = self._chat_stream(messages, max_tokens, temperature=0.7)
-        content = []
-        reasoning = []
-
-        for line in resp.iter_lines(decode_unicode=True):
-            if not line or not line.startswith("data: "):
-                continue
-            data_str = line[6:]
-            if data_str == "[DONE]":
-                break
-            try:
-                chunk = json.loads(data_str)
-                choices = chunk.get("choices", [])
-                if choices:
-                    delta = choices[0].get("delta", {})
-                    rc = delta.get("reasoning_content", "")
-                    ct = delta.get("content", "")
-                    if rc:
-                        reasoning.append(rc)
-                        sys.stdout.write(rc)
-                        sys.stdout.flush()
-                    if ct:
-                        content.append(ct)
-                        if not reasoning:
-                            sys.stdout.write(ct)
-                            sys.stdout.flush()
-            except json.JSONDecodeError:
-                continue
-
-        full_content = "".join(content)
-        full_reasoning = "".join(reasoning)
-
-        print(f"\n[PARSE] content='{full_content[:200]}'")
-        result = self._parse_raw(full_content, full_reasoning)
-        print(f"[PARSE] should_display={result['should_display']} text='{result['display_text'][:80]}' question='{result['question'][:80]}'")
-        return result
-
-    def _parse_raw(self, content: str, reasoning: str) -> dict:
-        parsed = {
-            "reasoning": reasoning or content[:500],
-            "should_display": False,
-            "display_text": "",
-            "question": "",
-            "wait_seconds": 10,
-        }
-
-        if not content.strip():
-            return parsed
-
-        if "REASONING:" in content:
-            parts = content.split("REASONING:", 1)
-            rest = parts[1] if len(parts) > 1 else content
-            parsed["reasoning"] = rest.split("DISPLAY:")[0].split("MESSAGE:")[0].strip()
-
-        if "DISPLAY:" in content:
-            display_match = content.split("DISPLAY:", 1)
-            if len(display_match) > 1:
-                # Get everything after DISPLAY: up to the next directive or end
-                rest = display_match[1]
-                for delimiter in ("MESSAGE:", "QUESTION:", "ASK:", "REASONING:"):
-                    if delimiter in rest:
-                        rest = rest.split(delimiter)[0]
-                rest = rest.strip().strip('"').strip("'")
-
-                if rest.lower() in ("yes", "yes."):
-                    parsed["should_display"] = True
-                elif rest.lower() in ("no", "no.", ""):
-                    pass
-                else:
-                    # DISPLAY: contains actual text (consolidation format)
-                    parsed["should_display"] = True
-                    parsed["display_text"] = rest
-
-        if "MESSAGE:" in content:
-            msg_parts = content.split("MESSAGE:", 1)
-            if len(msg_parts) > 1:
-                msg_text = msg_parts[1]
-                for delimiter in ("QUESTION:", "ASK:", "REASONING:"):
-                    if delimiter in msg_text:
-                        msg_text = msg_text.split(delimiter)[0]
-                msg_text = msg_text.strip().strip('"').strip("'")
-                if msg_text:
-                    parsed["should_display"] = True
-                    parsed["display_text"] = msg_text
-
-        if "QUESTION:" in content or "ASK:" in content:
-            q_key = "QUESTION:" if "QUESTION:" in content else "ASK:"
-            q_parts = content.split(q_key, 1)
-            if len(q_parts) > 1:
-                q_text = q_parts[1]
-                for delimiter in ("DISPLAY:", "MESSAGE:", "REASONING:", "WAIT:"):
-                    if delimiter in q_text:
-                        q_text = q_text.split(delimiter)[0]
-                q_text = q_text.strip().strip('"').strip("'")
-                if q_text and q_text.lower() not in ("no", "no.", "none"):
-                    parsed["question"] = q_text
-                    parsed["should_display"] = True
-
-        if "WAIT:" in content:
-            wait_parts = content.split("WAIT:", 1)
-            if len(wait_parts) > 1:
-                wait_str = wait_parts[1].strip().split()[0].strip("s")
-                try:
-                    parsed["wait_seconds"] = max(5, min(30, int(wait_str)))
-                except ValueError:
-                    pass
-
-        return parsed
+        return resp.json()["choices"][0]["message"]["content"].strip()

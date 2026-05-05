@@ -1,110 +1,61 @@
 """Conversation context manager with token estimation and automatic compaction."""
 
-import time
 import json
-from config import MAX_CONTEXT_TOKENS, KEEP_LAST_N_EXCHANGES, COMPACT_PROMPT
-
-
-def estimate_tokens(text: str) -> int:
-    """Rough token estimate: ~4 chars per token for English text."""
-    return len(text) // 4
-
-
-def estimate_image_tokens(width: int, height: int) -> int:
-    """Rough estimate for base64 image tokens in llama.cpp multimodal."""
-    pixels = width * height
-    return (pixels // 100) + 100
+from config import MAX_CONTEXT_TOKENS, KEEP_LAST_N_MESSAGES
 
 
 class Context:
     def __init__(self):
         self.messages = []
-        self.window_reasoning = []
-        self.previous_displays = []
-        self.last_photo_tokens = 0
-        self.photo_width = 0
-        self.photo_height = 0
-        self.total_photos = 0
 
     def add_system(self, content: str):
         self.messages.append({"role": "system", "content": content})
 
-    def add_reasoning(self, reasoning: str):
-        self.window_reasoning.append(
-            {"timestamp": time.strftime("%I:%M %p"), "reasoning": reasoning}
-        )
+    def add_user(self, content: str):
+        self.messages.append({"role": "user", "content": content})
 
-    def add_display(self, text: str):
-        self.previous_displays.append(text)
-        if len(self.previous_displays) > 10:
-            self.previous_displays = self.previous_displays[-10:]
-
-    def add_button_response(self, question: str, answer: str):
-        text = f"User responded to '{question}' with: {answer}"
-        self.window_reasoning.append({"timestamp": time.strftime("%I:%M %p"), "reasoning": text})
-
-    def get_window_text(self) -> str:
-        lines = []
-        for entry in self.window_reasoning:
-            lines.append(f"[{entry['timestamp']}] {entry['reasoning']}")
-        return "\n".join(lines)
-
-    def get_previous_display(self) -> str:
-        if self.previous_displays:
-            return self.previous_displays[-1]
-        return "(none — first display)"
-
-    def close_window(self, ai_client) -> str:
-        """Compact current window observations into a summary. Returns summary text."""
-        observations = self.get_window_text()
-        if not observations.strip():
-            self.window_reasoning = []
-            return ""
-
-        prompt = COMPACT_PROMPT.format(observations=observations)
-
-        try:
-            summary = ai_client._simple_chat(prompt, system=None)
-            compacted = f"[Window summary: {summary}]"
-        except Exception:
-            compacted = f"[Window observations: {observations[:500]}...]"
-
-        self.messages.append({"role": "user", "content": compacted})
-        self.window_reasoning = []
-        return summary
-
-    def build_request_data(self, photo_base64: str, photo_width: int, photo_height: int) -> list:
-        self.photo_width = photo_width
-        self.photo_height = photo_height
-        self.last_photo_tokens = estimate_image_tokens(photo_width, photo_height)
-        self.total_photos += 1
-
-        merged = list(self.messages)
-
-        if not merged or merged[0].get("role") != "system":
-            merged.insert(0, {"role": "system", "content": ""})
-
-        reasoning_text = self.get_window_text()
-        if reasoning_text:
-            text = (
-                f"Here is the latest photo of the room. "
-                f"Your observations so far this window:\n{reasoning_text}\n\n"
-                f"Observe this new photo and add your thoughts."
-            )
-        elif self.total_photos == 1:
-            text = "Here is the first photo of the room. What do you observe?"
-        else:
-            text = "Here is the first photo of a new observation window. What do you observe?"
-
-        merged.append({
+    def add_image(self, photo_uri: str):
+        self.messages = [m for m in self.messages if not self._is_image_message(m)]
+        self.messages.append({
             "role": "user",
             "content": [
-                {"type": "text", "text": text},
-                {"type": "image_url", "image_url": {"url": photo_base64}},
+                {"type": "text", "text": "Here is the latest photo from the camera."},
+                {"type": "image_url", "image_url": {"url": photo_uri}},
             ],
         })
 
-        return merged
+    def add_assistant(self, response: dict):
+        msg = {"role": "assistant"}
+        content = response.get("content", "")
+        if content:
+            msg["content"] = content
+        tool_calls = response.get("tool_calls", [])
+        if tool_calls:
+            msg["tool_calls"] = [
+                {
+                    "id": tc["id"],
+                    "type": "function",
+                    "function": {
+                        "name": tc["name"],
+                        "arguments": json.dumps(tc["arguments"]),
+                    },
+                }
+                for tc in tool_calls
+            ]
+            if "content" not in msg:
+                msg["content"] = ""
+        self.messages.append(msg)
+
+    def add_tool_result(self, tool_call_id: str, name: str, result: dict):
+        self.messages.append({
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "name": name,
+            "content": json.dumps(result),
+        })
+
+    def get_messages(self) -> list:
+        return list(self.messages)
 
     def total_tokens(self) -> int:
         total = 0
@@ -113,40 +64,63 @@ class Context:
             if isinstance(content, list):
                 for part in content:
                     if isinstance(part, dict) and part.get("type") == "image_url":
-                        total += self.last_photo_tokens
-                    elif isinstance(part, str):
-                        total += estimate_tokens(part)
-                    elif isinstance(part, dict):
-                        total += estimate_tokens(str(part))
-            else:
-                total += estimate_tokens(str(content))
-        total += estimate_tokens(self.get_window_text())
+                        total += 3500
+                    elif isinstance(part, dict) and part.get("type") == "text":
+                        total += len(part.get("text", "")) // 4
+            elif isinstance(content, str):
+                total += len(content) // 4
+            for tc in msg.get("tool_calls", []):
+                total += len(json.dumps(tc)) // 4
         return total
 
     def check_compact(self, ai_client):
-        """Compact if approaching token limit."""
-        current = self.total_tokens()
-        if current < MAX_CONTEXT_TOKENS * 0.7:
+        if self.total_tokens() < MAX_CONTEXT_TOKENS * 0.7:
             return
 
         system_msg = self.messages[0] if self.messages and self.messages[0]["role"] == "system" else None
-        to_keep = self.messages[-KEEP_LAST_N_EXCHANGES:] if len(self.messages) > KEEP_LAST_N_EXCHANGES else self.messages
+        keep_count = KEEP_LAST_N_MESSAGES
 
-        middle = self.messages[1:-KEEP_LAST_N_EXCHANGES] if system_msg else self.messages[:-KEEP_LAST_N_EXCHANGES]
-        if not middle:
+        if len(self.messages) <= keep_count + (1 if system_msg else 0):
             return
 
-        combined = "\n".join(str(m.get("content", "")) for m in middle)
-        if not combined.strip():
-            return
+        start = 1 if system_msg else 0
+        end = len(self.messages) - keep_count
+        to_compact = self.messages[start:end]
 
+        text_parts = []
+        for m in to_compact:
+            role = m.get("role", "?")
+            content = m.get("content", "")
+            if isinstance(content, list):
+                content = " ".join(
+                    p.get("text", "") for p in content
+                    if isinstance(p, dict) and p.get("type") == "text"
+                )
+            if m.get("tool_calls"):
+                tools = ", ".join(tc["function"]["name"] for tc in m["tool_calls"])
+                content = f"[called tools: {tools}] {content}"
+            if role == "tool":
+                content = f"[tool result for {m.get('name', '?')}] {content}"
+            text_parts.append(f"{role}: {content}")
+
+        combined = "\n".join(text_parts)
         try:
-            prompt = f"Summarize this conversation history concisely:\n\n{combined}"
-            summary = ai_client._simple_chat(prompt, system="Summarize concisely.")
+            summary = ai_client.compact(combined)
         except Exception:
-            summary = combined[:1000] + "..."
+            summary = combined[:1000]
 
-        new_messages = [system_msg] if system_msg else []
-        new_messages.append({"role": "user", "content": f"[Compacted history: {summary}]"})
-        new_messages.extend(to_keep)
+        new_messages = []
+        if system_msg:
+            new_messages.append(system_msg)
+        new_messages.append({"role": "user", "content": f"[Previous context summary: {summary}]"})
+        new_messages.extend(self.messages[end:])
         self.messages = new_messages
+
+    def _is_image_message(self, msg: dict) -> bool:
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            return any(
+                isinstance(p, dict) and p.get("type") == "image_url"
+                for p in content
+            )
+        return False

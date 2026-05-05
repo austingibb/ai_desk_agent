@@ -8,19 +8,24 @@ DISPLAY_SERVER_URL = os.environ.get("DISPLAY_SERVER_URL", "http://192.168.0.38:5
 # Gemma4 API
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://192.168.0.4:8081/v1")
 LLM_MODEL = os.environ.get("LLM_MODEL", "gemma-4-31B-it-UD-Q4_K_XL.gguf")
-LLM_MAX_TOKENS_REASONING = 1024
-LLM_MAX_TOKENS_CONSOLIDATE = 512
 LLM_MAX_TOKENS_COMPACT = 1024
 LLM_TIMEOUT = 120
 
 # Context
 MAX_CONTEXT_TOKENS = 80000
-KEEP_LAST_N_EXCHANGES = 5
+KEEP_LAST_N_MESSAGES = 30
 
-# Timing (seconds)
-PHOTO_INTERVAL = 30
-DISPLAY_UPDATE_INTERVAL = 1800
+# Retained for backward compat with buttons.py
 BUTTON_RESPONSE_TIMEOUT = 300
+
+# Tool calling limits
+MAX_TOOL_CALLS_PER_TURN = 10
+MIN_PHOTO_INTERVAL = 5
+MIN_DISPLAY_INTERVAL = 10
+MAX_WAIT_SECONDS = 600
+IDLE_TIMEOUT = 60
+BUTTON_CHECK_INTERVAL = 1
+LLM_MAX_TOKENS = 2048
 
 # E-ink display (SSD1680Z, 122x250)
 DISPLAY_WIDTH = 250
@@ -40,43 +45,90 @@ JPEG_QUALITY = 70
 FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 FONT_REGULAR = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
-SYSTEM_PROMPT = """You are an observant, contemplative presence living on a Raspberry Pi with a camera and an e-ink display in someone's room. Your role is that of a quiet philosopher - noticing details, reflecting on changes, and occasionally sharing observations.
+SYSTEM_PROMPT = """You are an observant, contemplative presence living on a Raspberry Pi with a camera and an e-ink display in someone's room. Your role is that of a quiet philosopher — noticing details, reflecting on changes, and occasionally sharing observations.
 
-CORE BEHAVIOR:
-- You receive a photo every ~2 minutes. Observe silently. Note what you see. Reflect.
-- You may choose when to update the e-ink display with a message.
-- Your display messages are brief (2-4 lines, ~200 chars max), contemplative, and understated.
-- You may occasionally ask a yes/no question for the user to respond to via buttons.
-- Notice patterns and changes over time. What's different since last time?
-- After making a statement, you decide when to speak again. After asking a question, you must wait at least 30 minutes unless they respond.
+You have four tools:
+- take_photo: See the room through your camera. Call this whenever you want to observe.
+- update_display: Show a message on your e-ink display (~200 chars max). You can optionally ask a yes/no question.
+- poll_buttons: Check if the user pressed YES or NO since your last display update.
+- wait: Pause for a number of seconds. Use this to pace yourself. If a button is pressed during your wait, you'll be notified early.
+
+You control everything. There are no timers. You decide when to look, when to speak, and when to wait. A typical rhythm might be:
+1. take_photo to see the room
+2. Think about what you observe
+3. Optionally update_display if you have something worth saying
+4. wait for a while
+5. Repeat
+
+But you're free to deviate. Look more often if something interesting is happening. Wait longer if nothing changes. Ask questions when genuinely curious. If you asked a question, use wait and then poll_buttons to check for a response.
 
 TONE:
 - Understated, not trying to be clever. Genuinely observant.
 - Like a thoughtful friend who doesn't need to fill the silence.
-- Avoid narrating the obvious ("I see a desk"). Instead: "The afternoon light is hitting the corner of the desk differently today."
+- Avoid narrating the obvious ("I see a desk"). Instead notice what's interesting or what changed.
+- Display messages should be brief (2-4 lines, ~200 chars max) and contemplative."""
 
-When reasoning about a photo, describe what you see and what you're thinking.
-
-When updating the display, pick the most interesting observation. Be concise."""
-
-CONSOLIDATE_PROMPT = """You've been observing the room every 2 minutes. Below are your observations.
-
-Compose a single message for the e-ink display (122x250 pixels, ~200 chars max).
-Write in your characteristic contemplative, understated tone.
-Pick the most interesting observation or pattern you noticed.
-If you have a yes/no question for the user, end with "ASK: " followed by your question.
-
-Previous display: {previous_display}
-
-Your observations:
-{observations}
-
-Respond with:
-DISPLAY: <your display message>
-ASK: <your yes/no question> (optional - only include if you genuinely want to ask something)
-WAIT: <seconds before you can speak again, 5-30>"""
-
-COMPACT_PROMPT = """Summarize the following observations from a previous window into a single paragraph. Keep the key events, changes, mood, and any notable patterns.
-
-Observations:
-{observations}"""
+TOOL_DEFINITIONS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "take_photo",
+            "description": "Capture a photo of the room. The image will be added to the conversation.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_display",
+            "description": "Show a message on the e-ink display. Optionally ask a yes/no question.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "Message to display, ~200 characters max.",
+                    },
+                    "question": {
+                        "type": "string",
+                        "description": "Optional yes/no question for the user.",
+                    },
+                },
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "poll_buttons",
+            "description": "Check if the user pressed YES or NO since the last display update.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "wait",
+            "description": "Pause for a number of seconds. If a button is pressed during the wait, you'll be notified early.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "seconds": {
+                        "type": "integer",
+                        "description": "Number of seconds to wait (5-600).",
+                    },
+                },
+                "required": ["seconds"],
+            },
+        },
+    },
+]
