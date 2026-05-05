@@ -153,7 +153,6 @@ class Orchestrator:
                 question = result.get("question", "")
                 print(f"[PARSE] display_text='{display_text[:50]}' question='{question}'")
             else:
-            else:
                 messages = self.ctx.build_request_data(photo_uri, CAMERA_WIDTH, CAMERA_HEIGHT)
                 result = self.ai.reason_about_photo(messages)
                 if result.get("reasoning"):
