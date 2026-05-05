@@ -55,25 +55,28 @@ class Context:
         })
 
     def add_assistant(self, response: dict):
+        tool_calls = response.get("tool_calls", [])
+        content = (response.get("content") or "").strip()
+
+        if not tool_calls:
+            return
+
         msg = {"role": "assistant"}
-        content = response.get("content", "")
         if content:
             msg["content"] = content
-        tool_calls = response.get("tool_calls", [])
-        if tool_calls:
-            msg["tool_calls"] = [
-                {
-                    "id": tc["id"],
-                    "type": "function",
-                    "function": {
-                        "name": tc["name"],
-                        "arguments": json.dumps(tc["arguments"]),
-                    },
-                }
-                for tc in tool_calls
-            ]
-            if "content" not in msg:
-                msg["content"] = ""
+        else:
+            msg["content"] = ""
+        msg["tool_calls"] = [
+            {
+                "id": tc["id"],
+                "type": "function",
+                "function": {
+                    "name": tc["name"],
+                    "arguments": json.dumps(tc["arguments"]),
+                },
+            }
+            for tc in tool_calls
+        ]
         self.messages.append(msg)
 
     def add_tool_result(self, tool_call_id: str, name: str, result: dict):
