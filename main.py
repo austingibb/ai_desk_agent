@@ -218,17 +218,16 @@ class Orchestrator:
         seconds = max(5, min(MAX_WAIT_SECONDS, args.get("seconds", 60)))
         print(f"[WAIT] Sleeping {seconds}s...")
 
-        self.chat_event.clear()
-
         start = time.monotonic()
         while time.monotonic() - start < seconds:
-            if not self.running:
-                return {"status": "interrupted", "reason": "shutdown", "waited": int(time.monotonic() - start)}
-
             if self.chat_event.is_set():
                 self.chat_event.clear()
                 waited = int(time.monotonic() - start)
+                print(f"[WAIT] Interrupted by chat message after {waited}s")
                 return {"status": "interrupted", "reason": "chat_message", "waited": waited}
+
+            if not self.running:
+                return {"status": "interrupted", "reason": "shutdown", "waited": int(time.monotonic() - start)}
 
             result = http_get("/buttons/state", timeout=2)
             if result.get("button"):
