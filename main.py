@@ -161,7 +161,12 @@ class Orchestrator:
                 question = result.get("question", "")
 
             if not display_text.strip():
-                display_text = "..."
+                # Fallback: use last reasoning observation as display text
+                obs_lines = observations.strip().split("\n")
+                if obs_lines:
+                    display_text = obs_lines[-1].strip()[:200]
+                else:
+                    display_text = "..."
 
             self._send_to_display(display_text, question)
 
@@ -172,8 +177,13 @@ class Orchestrator:
         display_text = result.get("display_text", "").strip()
         question = result.get("question", "").strip()
 
-        if not display_text:
-            return
+        if not display_text and not question:
+            # AI said DISPLAY: yes but gave no MESSAGE — use reasoning snippet
+            reasoning = result.get("reasoning", "")
+            if reasoning:
+                display_text = reasoning[:200]
+            else:
+                return
 
         self._send_to_display(display_text, question)
 

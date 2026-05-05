@@ -137,7 +137,10 @@ class AIClient:
         full_content = "".join(content)
         full_reasoning = "".join(reasoning)
 
-        return self._parse_raw(full_content, full_reasoning)
+        print(f"\n[PARSE] content='{full_content[:200]}'")
+        result = self._parse_raw(full_content, full_reasoning)
+        print(f"[PARSE] should_display={result['should_display']} text='{result['display_text'][:80]}' question='{result['question'][:80]}'")
+        return result
 
     def _parse_raw(self, content: str, reasoning: str) -> dict:
         parsed = {
@@ -147,32 +150,56 @@ class AIClient:
             "question": "",
         }
 
+        if not content.strip():
+            return parsed
+
         if "REASONING:" in content:
             parts = content.split("REASONING:", 1)
             rest = parts[1] if len(parts) > 1 else content
-            parsed["reasoning"] = rest.split("DISPLAY:")[0].strip()
+            parsed["reasoning"] = rest.split("DISPLAY:")[0].split("MESSAGE:")[0].strip()
 
         if "DISPLAY:" in content:
             display_match = content.split("DISPLAY:", 1)
             if len(display_match) > 1:
-                rest = display_match[1].split("\n")[0].strip()
-                if rest.lower().startswith("yes"):
+                # Get everything after DISPLAY: up to the next directive or end
+                rest = display_match[1]
+                for delimiter in ("MESSAGE:", "QUESTION:", "ASK:", "REASONING:"):
+                    if delimiter in rest:
+                        rest = rest.split(delimiter)[0]
+                rest = rest.strip().strip('"').strip("'")
+
+                if rest.lower() in ("yes", "yes."):
                     parsed["should_display"] = True
-                elif rest.lower() not in ("no", ""):
+                elif rest.lower() in ("no", "no.", ""):
+                    pass
+                else:
+                    # DISPLAY: contains actual text (consolidation format)
+                    parsed["should_display"] = True
                     parsed["display_text"] = rest
 
         if "MESSAGE:" in content:
             msg_parts = content.split("MESSAGE:", 1)
             if len(msg_parts) > 1:
                 msg_text = msg_parts[1]
-                if "QUESTION:" in msg_text:
-                    msg_text = msg_text.split("QUESTION:")[0]
-                parsed["display_text"] = msg_text.strip().strip('"').strip("'")
+                for delimiter in ("QUESTION:", "ASK:", "REASONING:"):
+                    if delimiter in msg_text:
+                        msg_text = msg_text.split(delimiter)[0]
+                msg_text = msg_text.strip().strip('"').strip("'")
+                if msg_text:
+                    parsed["should_display"] = True
+                    parsed["display_text"] = msg_text
 
         if "QUESTION:" in content or "ASK:" in content:
             q_key = "QUESTION:" if "QUESTION:" in content else "ASK:"
             q_parts = content.split(q_key, 1)
             if len(q_parts) > 1:
-                parsed["question"] = q_parts[1].strip().strip('"').strip("'")
+                q_text = q_parts[1]
+                for delimiter in ("DISPLAY:", "MESSAGE:", "REASONING:"):
+                    if delimiter in q_text:
+                        q_text = q_text.split(delimiter)[0]
+                q_text = q_text.strip().strip('"').strip("'")
+                if q_text and q_text.lower() not in ("no", "no.", "none"):
+                    parsed["question"] = q_text
+                    parsed["should_display"] = True
 
         return parsed
