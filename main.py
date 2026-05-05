@@ -5,6 +5,8 @@ import time
 import signal
 import sys
 import json
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 from config import (
     DISPLAY_SERVER_URL,
@@ -18,6 +20,7 @@ from config import (
     BUTTON_CHECK_INTERVAL,
     CAMERA_WIDTH,
     CAMERA_HEIGHT,
+    CHAT_SERVER_PORT,
 )
 from context import Context
 from camera import Camera
@@ -51,6 +54,8 @@ class Orchestrator:
         self.running = True
         self.last_photo_time = 0
         self.last_display_time = 0
+        self.chat_event = threading.Event()
+        self.ctx_lock = threading.Lock()
 
         signal.signal(signal.SIGINT, self._handle_signal)
         signal.signal(signal.SIGTERM, self._handle_signal)
@@ -62,8 +67,14 @@ class Orchestrator:
     def run(self):
         print("Init camera...")
         print("Init AI client...")
-        self.ctx.add_system(SYSTEM_PROMPT)
-        self.ctx.add_user("You just woke up! Use take_photo to see the room and say hi.")
+        self._start_chat_server()
+        with self.ctx_lock:
+            if self.ctx.load():
+                print("Resuming from saved context.")
+                self.ctx.add_user("You just woke back up after a restart! Use take_photo to see the room and pick up where you left off.")
+            else:
+                self.ctx.add_system(SYSTEM_PROMPT)
+                self.ctx.add_user("You just woke up! Use take_photo to see the room and say hi.")
         print("Entering agent loop.")
 
         while self.running:
@@ -77,21 +88,26 @@ class Orchestrator:
 
     def _turn(self):
         tool_call_count = 0
+        last_tool_name = None
 
         while self.running:
             tools = TOOL_DEFINITIONS if tool_call_count < MAX_TOOL_CALLS_PER_TURN else None
             if tools is None:
                 print("[SAFETY] Tool call limit reached, forcing text-only response")
 
-            print(f"[LLM] Sending {len(self.ctx.get_messages())} messages (~{self.ctx.total_tokens()} tokens)...")
+            with self.ctx_lock:
+                messages = self.ctx.get_messages()
+                tokens = self.ctx.total_tokens()
+            print(f"[LLM] Sending {len(messages)} messages (~{tokens} tokens)...")
             try:
-                response = self.ai.chat_with_tools(self.ctx.get_messages(), tools)
+                response = self.ai.chat_with_tools(messages, tools)
             except Exception as e:
                 print(f"[LLM] Error: {e}")
                 time.sleep(5)
                 return
 
-            self.ctx.add_assistant(response)
+            with self.ctx_lock:
+                self.ctx.add_assistant(response)
 
             if response["reasoning"]:
                 print(f"[REASONING] {response['reasoning'][:200]}...")
@@ -99,18 +115,27 @@ class Orchestrator:
                 print(f"[AI] {response['content'][:200]}")
 
             if not response["tool_calls"]:
+                if last_tool_name == "update_display":
+                    print("[PROMPT] No tool call after display update, nudging LLM to continue rhythm...")
+                    with self.ctx_lock:
+                        self.ctx.add_user("Display is updated. Continue the rhythm — what's your next action?")
+                    last_tool_name = None
+                    continue
                 print("[IDLE] AI produced no tool calls. Waiting...")
                 self._idle_wait()
                 return
 
             for tc in response["tool_calls"]:
                 tool_call_count += 1
+                last_tool_name = tc["name"]
                 print(f"[TOOL] {tc['name']}({tc['arguments']})")
                 result = self._execute_tool(tc["name"], tc["arguments"])
                 print(f"[TOOL RESULT] {json.dumps(result)[:200]}")
-                self.ctx.add_tool_result(tc["id"], tc["name"], result)
+                with self.ctx_lock:
+                    self.ctx.add_tool_result(tc["id"], tc["name"], result)
 
-            self.ctx.check_compact(self.ai)
+            with self.ctx_lock:
+                self.ctx.check_compact(self.ai)
 
     def _execute_tool(self, name: str, args: dict) -> dict:
         if name == "take_photo":
@@ -135,7 +160,8 @@ class Orchestrator:
             return {"status": "error", "message": f"Camera error: {e}"}
 
         self.last_photo_time = time.monotonic()
-        self.ctx.add_image(photo_uri)
+        with self.ctx_lock:
+            self.ctx.add_image(photo_uri)
         return {"status": "ok", "description": "Photo captured and added to conversation."}
 
     def _tool_update_display(self, args: dict) -> dict:
@@ -173,6 +199,11 @@ class Orchestrator:
             if not self.running:
                 return {"status": "interrupted", "reason": "shutdown", "waited": int(time.monotonic() - start)}
 
+            if self.chat_event.is_set():
+                self.chat_event.clear()
+                waited = int(time.monotonic() - start)
+                return {"status": "interrupted", "reason": "chat_message", "waited": waited}
+
             result = http_get("/buttons/state", timeout=2)
             if result.get("button"):
                 waited = int(time.monotonic() - start)
@@ -190,18 +221,163 @@ class Orchestrator:
         for _ in range(IDLE_TIMEOUT):
             if not self.running:
                 return
+            if self.chat_event.is_set():
+                self.chat_event.clear()
+                return
             time.sleep(1)
-        self.ctx.add_user(
-            "Some time has passed. Use take_photo to see the room, or wait to stay quiet."
-        )
+        with self.ctx_lock:
+            self.ctx.add_user(
+                "Some time has passed. Use take_photo to see the room, or wait to stay quiet."
+            )
+
+    def _start_chat_server(self):
+        ChatHandler.orchestrator = self
+        server = HTTPServer(("0.0.0.0", CHAT_SERVER_PORT), ChatHandler)
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        print(f"[CHAT] Server listening on :{CHAT_SERVER_PORT}")
 
     def cleanup(self):
         print("Cleaning up...")
+        with self.ctx_lock:
+            self.ctx.save()
         try:
             self.camera.close()
         except Exception:
             pass
         print("Done.")
+
+
+CHAT_HTML = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI Roommate Chat</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,sans-serif;background:#1a1a2e;color:#e0e0e0;height:100vh;display:flex;flex-direction:column}
+#messages{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:8px}
+.msg{padding:10px 14px;border-radius:12px;max-width:80%;word-wrap:break-word;line-height:1.4}
+.user{align-self:flex-end;background:#0f3460;color:#e0e0e0}
+.assistant{align-self:flex-start;background:#16213e;color:#e0e0e0}
+.role{font-size:11px;opacity:0.6;margin-bottom:2px}
+#form{display:flex;gap:8px;padding:12px;background:#16213e;border-top:1px solid #0f3460}
+#input{flex:1;padding:10px 14px;border:1px solid #0f3460;border-radius:20px;background:#1a1a2e;color:#e0e0e0;font-size:15px;outline:none}
+#input:focus{border-color:#e94560}
+button{padding:10px 20px;background:#e94560;color:#fff;border:none;border-radius:20px;font-size:15px;cursor:pointer}
+button:hover{background:#c73e54}
+</style></head><body>
+<div id="messages"></div>
+<form id="form"><input id="input" placeholder="Say something..." autocomplete="off"><button type="submit">Send</button></form>
+<script>
+let lastLen=0;
+async function refresh(){
+  try{
+    const r=await fetch('/chat');
+    const msgs=await r.json();
+    if(msgs.length===lastLen)return;
+    lastLen=msgs.length;
+    const div=document.getElementById('messages');
+    div.innerHTML=msgs.map(m=>`<div class="msg ${m.role}"><div class="role">${m.role}</div>${m.content.replace(/</g,'&lt;')}</div>`).join('');
+    div.scrollTop=div.scrollHeight;
+  }catch(e){}
+}
+setInterval(refresh,2000);
+refresh();
+document.getElementById('form').onsubmit=async e=>{
+  e.preventDefault();
+  const inp=document.getElementById('input');
+  const msg=inp.value.trim();
+  if(!msg)return;
+  inp.value='';
+  await fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg})});
+  refresh();
+};
+</script></body></html>"""
+
+NUDGE_PREFIXES = [
+    "Some time has passed",
+    "Display is updated. Continue the rhythm",
+    "You just woke up!",
+    "Here is the latest photo",
+]
+
+
+class ChatHandler(BaseHTTPRequestHandler):
+    orchestrator = None
+
+    def log_message(self, format, *args):
+        pass  # suppress default access logs
+
+    def do_GET(self):
+        if self.path == "/":
+            self._serve_html()
+        elif self.path == "/chat":
+            self._get_messages()
+        else:
+            self.send_error(404)
+
+    def do_POST(self):
+        if self.path == "/chat":
+            self._post_message()
+        else:
+            self.send_error(404)
+
+    def _serve_html(self):
+        data = CHAT_HTML.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _get_messages(self):
+        orch = ChatHandler.orchestrator
+        with orch.ctx_lock:
+            msgs = list(orch.ctx.get_messages())
+
+        filtered = []
+        for m in msgs:
+            role = m.get("role")
+            content = m.get("content", "")
+            if role == "system" or role == "tool":
+                continue
+            if isinstance(content, list):
+                continue  # image messages
+            if not content or not content.strip():
+                continue
+            if role == "user" and any(content.startswith(p) for p in NUDGE_PREFIXES):
+                continue
+            filtered.append({"role": role, "content": content})
+
+        # Return last 50 messages
+        filtered = filtered[-50:]
+        data = json.dumps(filtered).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _post_message(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(length))
+        message = body.get("message", "").strip()
+
+        if not message:
+            self.send_error(400, "Empty message")
+            return
+
+        orch = ChatHandler.orchestrator
+        with orch.ctx_lock:
+            orch.ctx.add_user(message)
+        orch.chat_event.set()
+        print(f"[CHAT] User message: {message[:100]}")
+
+        data = json.dumps({"status": "ok"}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
 
 def main():

@@ -1,6 +1,7 @@
 """Gemma4 API client — tool-calling support via llama.cpp OpenAI-compatible endpoint."""
 
 import json
+import re
 import requests
 from config import (
     LLM_BASE_URL,
@@ -9,6 +10,36 @@ from config import (
     LLM_MAX_TOKENS_COMPACT,
     LLM_TIMEOUT,
 )
+
+# Gemma4 on llama.cpp sometimes outputs tool calls as inline text
+# e.g. <|tool_call>call:wait{seconds:600}<tool_call|>
+INLINE_TOOL_RE = re.compile(
+    r"<\|tool_call>\s*call:(\w+)\s*(\{[^}]*\})\s*<tool_call\|?>",
+    re.DOTALL,
+)
+
+
+def _parse_inline_args(args_str: str) -> dict:
+    """Parse {key:value, ...} from inline tool call (non-JSON, unquoted keys)."""
+    result = {}
+    if not args_str.strip():
+        return result
+    inner = args_str.strip().strip("{}")
+    pairs = [p.strip() for p in inner.split(",") if p.strip()]
+    for pair in pairs:
+        if ":" not in pair:
+            continue
+        key, val = pair.split(":", 1)
+        key = key.strip()
+        val = val.strip()
+        if val.isdigit():
+            val = int(val)
+        elif val.lower() in ("true", "false"):
+            val = val.lower() == "true"
+        else:
+            val = val.strip('"').strip("'")
+        result[key] = val
+    return result
 
 
 class AIClient:
@@ -50,8 +81,22 @@ class AIClient:
                 "arguments": args,
             })
 
+        content = (msg.get("content") or "").strip()
+
+        if not tool_calls:
+            for m in INLINE_TOOL_RE.finditer(content):
+                name = m.group(1)
+                args = _parse_inline_args(m.group(2))
+                tool_calls.append({
+                    "id": f"call_{len(tool_calls)}",
+                    "name": name,
+                    "arguments": args,
+                })
+            if tool_calls:
+                content = INLINE_TOOL_RE.sub("", content).strip()
+
         return {
-            "content": (msg.get("content") or "").strip(),
+            "content": content,
             "reasoning": (msg.get("reasoning_content") or "").strip(),
             "tool_calls": tool_calls,
             "raw_message": msg,

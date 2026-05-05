@@ -1,12 +1,42 @@
 """Conversation context manager with token estimation and automatic compaction."""
 
 import json
-from config import MAX_CONTEXT_TOKENS, KEEP_LAST_N_MESSAGES
+import os
+from config import MAX_CONTEXT_TOKENS, KEEP_LAST_N_MESSAGES, PROJECT_DIR
+
+CONTEXT_FILE = os.path.join(PROJECT_DIR, "context.json")
 
 
 class Context:
     def __init__(self):
         self.messages = []
+
+    def save(self):
+        """Save messages to disk, stripping image data."""
+        to_save = []
+        for m in self.messages:
+            if self._is_image_message(m):
+                continue
+            to_save.append(m)
+        try:
+            with open(CONTEXT_FILE, "w") as f:
+                json.dump(to_save, f)
+            print(f"[CONTEXT] Saved {len(to_save)} messages to {CONTEXT_FILE}")
+        except Exception as e:
+            print(f"[CONTEXT] Save error: {e}")
+
+    def load(self) -> bool:
+        """Load messages from disk. Returns True if loaded successfully."""
+        if not os.path.exists(CONTEXT_FILE):
+            return False
+        try:
+            with open(CONTEXT_FILE, "r") as f:
+                self.messages = json.load(f)
+            print(f"[CONTEXT] Loaded {len(self.messages)} messages from {CONTEXT_FILE}")
+            return True
+        except Exception as e:
+            print(f"[CONTEXT] Load error: {e}")
+            return False
 
     def add_system(self, content: str):
         self.messages.append({"role": "system", "content": content})
