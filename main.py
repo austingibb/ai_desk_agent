@@ -192,6 +192,9 @@ class Orchestrator:
         if not text.strip():
             return {"status": "error", "message": "No text provided"}
 
+        timestamp = time.strftime("%-I:%M%p").lower().lstrip("0")
+        text = f"{text}\n\n— {timestamp}"
+
         elapsed = time.monotonic() - self.last_display_time
         if elapsed < MIN_DISPLAY_INTERVAL:
             time.sleep(MIN_DISPLAY_INTERVAL - elapsed)
