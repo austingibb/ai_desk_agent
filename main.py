@@ -107,7 +107,17 @@ class Orchestrator:
         print(f"[CONTEXT] {len(self.ctx.messages)} msgs, ~{self.ctx.total_tokens()} tokens")
         obs = self.ctx.get_window_text()
         if obs:
-            print(f"[CONTEXT] Observations so far:\n{obs}\n---")
+            print(f"[OBSERVATIONS]\n{obs}\n---")
+        for i, msg in enumerate(messages):
+            c = msg.get("content", "")
+            if isinstance(c, list):
+                for part in c:
+                    if part.get("type") == "text":
+                        print(f"[PROMPT msg {i}]\n{part['text'][:2000]}")
+                    elif part.get("type") == "image_url":
+                        print(f"[PROMPT msg {i}] <image {CAMERA_WIDTH}x{CAMERA_HEIGHT}>")
+            elif isinstance(c, str):
+                print(f"[PROMPT msg {i}]\n{c[:500]}")
         print(f"[AI] Sending to {self.ai.model}...", flush=True)
         try:
             result = self.ai.reason_about_photo(messages)
