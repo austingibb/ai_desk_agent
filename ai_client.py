@@ -152,10 +152,14 @@ class AIClient:
             rest = parts[1] if len(parts) > 1 else content
             parsed["reasoning"] = rest.split("DISPLAY:")[0].strip()
 
-        if "DISPLAY:" in content.lower():
-            display_part = content.lower().split("display:")[1].strip()
-            if display_part.startswith("yes"):
-                parsed["should_display"] = True
+        if "DISPLAY:" in content:
+            display_match = content.split("DISPLAY:", 1)
+            if len(display_match) > 1:
+                rest = display_match[1].split("\n")[0].strip()
+                if rest.lower().startswith("yes"):
+                    parsed["should_display"] = True
+                elif rest.lower() not in ("no", ""):
+                    parsed["display_text"] = rest
 
         if "MESSAGE:" in content:
             msg_parts = content.split("MESSAGE:", 1)
