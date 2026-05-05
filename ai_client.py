@@ -82,7 +82,8 @@ class AIClient:
                 "REASONING: <your observations and thoughts>\n"
                 "DISPLAY: <yes/no>\n"
                 "MESSAGE: <display text, ~200 chars max, if DISPLAY is yes>\n"
-                "QUESTION: <yes/no question, only if you want to ask one>"
+                "QUESTION: <yes/no question, only if you want to ask one>\n"
+                "WAIT: <seconds before you can speak again, 5-30>"
             )
         else:
             instruction = (
@@ -148,6 +149,7 @@ class AIClient:
             "should_display": False,
             "display_text": "",
             "question": "",
+            "wait_seconds": 10,
         }
 
         if not content.strip():
@@ -194,12 +196,21 @@ class AIClient:
             q_parts = content.split(q_key, 1)
             if len(q_parts) > 1:
                 q_text = q_parts[1]
-                for delimiter in ("DISPLAY:", "MESSAGE:", "REASONING:"):
+                for delimiter in ("DISPLAY:", "MESSAGE:", "REASONING:", "WAIT:"):
                     if delimiter in q_text:
                         q_text = q_text.split(delimiter)[0]
                 q_text = q_text.strip().strip('"').strip("'")
                 if q_text and q_text.lower() not in ("no", "no.", "none"):
                     parsed["question"] = q_text
                     parsed["should_display"] = True
+
+        if "WAIT:" in content:
+            wait_parts = content.split("WAIT:", 1)
+            if len(wait_parts) > 1:
+                wait_str = wait_parts[1].strip().split()[0].strip("s")
+                try:
+                    parsed["wait_seconds"] = max(5, min(30, int(wait_str)))
+                except ValueError:
+                    pass
 
         return parsed

@@ -73,7 +73,8 @@ Your observations:
 
 Respond with:
 DISPLAY: <your display message>
-ASK: <your yes/no question> (optional - only include if you genuinely want to ask something)"""
+ASK: <your yes/no question> (optional - only include if you genuinely want to ask something)
+WAIT: <seconds before you can speak again, 5-30>"""
 
 COMPACT_PROMPT = """Summarize the following observations from a previous window into a single paragraph. Keep the key events, changes, mood, and any notable patterns.
 

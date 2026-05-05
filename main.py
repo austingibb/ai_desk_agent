@@ -176,6 +176,7 @@ class Orchestrator:
     def _do_display_update(self, result: dict):
         display_text = result.get("display_text", "").strip()
         question = result.get("question", "").strip()
+        wait_seconds = result.get("wait_seconds", 10)
 
         if not display_text and not question:
             # AI said DISPLAY: yes but gave no MESSAGE — use reasoning snippet
@@ -185,10 +186,10 @@ class Orchestrator:
             else:
                 return
 
-        self._send_to_display(display_text, question)
+        self._send_to_display(display_text, question, wait_seconds)
 
-    def _send_to_display(self, display_text: str, question: str):
-        print(f"[SEND] text='{display_text[:60]}'  question='{question}'")
+    def _send_to_display(self, display_text: str, question: str, wait_seconds: int = 10):
+        print(f"[SEND] text='{display_text[:60]}'  question='{question}'  wait={wait_seconds}s")
 
         success = http_post("/display", {"text": display_text, "question": question}, timeout=10)
         if not success:
@@ -211,7 +212,8 @@ class Orchestrator:
             else:
                 print("[BUTTON] Timed out")
         else:
-            pass
+            print(f"[COOLDOWN] Waiting {wait_seconds}s before speaking again")
+            self._set_cooldown(wait_seconds)
 
     def cleanup(self):
         print("Cleaning up...")
