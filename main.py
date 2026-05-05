@@ -63,7 +63,7 @@ class Orchestrator:
         print("Init camera...")
         print("Init AI client...")
         self.ctx.add_system(SYSTEM_PROMPT)
-        self.ctx.add_user("You've just been powered on. Use take_photo to see the room for the first time.")
+        self.ctx.add_user("You just woke up! Use take_photo to see the room and say hi.")
         print("Entering agent loop.")
 
         while self.running:
