@@ -25,6 +25,7 @@ from config import (
 from context import Context
 from camera import Camera
 from ai_client import AIClient
+from mcp_client import MCPClient
 
 
 def http_get(path: str, timeout: int = 5) -> dict:
@@ -56,6 +57,17 @@ class Orchestrator:
         self.last_display_time = 0
         self.chat_event = threading.Event()
         self.ctx_lock = threading.Lock()
+        self.mcp_tools = []
+        self.mcp = None
+
+        try:
+            print("Init MCP client...")
+            self.mcp = MCPClient()
+            tools = self.mcp.initialize()
+            self.mcp_tools = self.mcp.get_tool_definitions()
+            print(f"[MCP] Discovered {len(tools)} tools: {[t['name'] for t in tools]}")
+        except Exception as e:
+            print(f"[MCP] Unavailable: {e}")
 
         signal.signal(signal.SIGINT, self._handle_signal)
         signal.signal(signal.SIGTERM, self._handle_signal)
@@ -91,9 +103,13 @@ class Orchestrator:
         last_tool_name = None
 
         while self.running:
-            tools = TOOL_DEFINITIONS if tool_call_count < MAX_TOOL_CALLS_PER_TURN else None
-            if tools is None:
+            local_tools = TOOL_DEFINITIONS if tool_call_count < MAX_TOOL_CALLS_PER_TURN else None
+            if local_tools is None:
                 print("[SAFETY] Tool call limit reached, forcing text-only response")
+            tools = local_tools
+            if local_tools is not None and self.mcp_tools:
+                tools = local_tools.copy()
+                tools.extend(self.mcp_tools)
 
             with self.ctx_lock:
                 messages = self.ctx.get_messages()
@@ -147,6 +163,11 @@ class Orchestrator:
         elif name == "wait":
             return self._tool_wait(args)
         else:
+            if self.mcp:
+                try:
+                    return self.mcp.call_tool(name, args)
+                except Exception as e:
+                    return {"error": f"MCP tool '{name}' failed: {e}"}
             return {"error": f"Unknown tool: {name}. Available: take_photo, update_display, poll_buttons, wait"}
 
     def _tool_take_photo(self) -> dict:
@@ -338,15 +359,25 @@ class ChatHandler(BaseHTTPRequestHandler):
         for m in msgs:
             role = m.get("role")
             content = m.get("content", "")
-            if role == "system" or role == "tool":
-                continue
-            if isinstance(content, list):
-                continue  # image messages
-            if not content or not content.strip():
-                continue
-            if role == "user" and any(content.startswith(p) for p in NUDGE_PREFIXES):
-                continue
-            filtered.append({"role": role, "content": content})
+            if role == "user":
+                if isinstance(content, list):
+                    continue  # image messages
+                if not content or not content.strip():
+                    continue
+                if any(content.startswith(p) for p in NUDGE_PREFIXES):
+                    continue
+                filtered.append({"role": role, "content": content})
+            elif role == "assistant":
+                # Show only what was sent to the display
+                for tc in m.get("tool_calls", []):
+                    if tc.get("function", {}).get("name") == "update_display":
+                        try:
+                            args = json.loads(tc["function"]["arguments"])
+                            display_text = args.get("text", "")
+                            if display_text.strip():
+                                filtered.append({"role": "assistant", "content": display_text})
+                        except (json.JSONDecodeError, KeyError):
+                            pass
 
         # Return last 50 messages
         filtered = filtered[-50:]
