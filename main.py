@@ -104,7 +104,11 @@ class Orchestrator:
             return
 
         messages = self.ctx.build_request_data(photo_uri, CAMERA_WIDTH, CAMERA_HEIGHT)
-        print(f"[AI] Sending to {self.ai.model}...")
+        print(f"[CONTEXT] {len(self.ctx.messages)} msgs, ~{self.ctx.total_tokens()} tokens")
+        obs = self.ctx.get_window_text()
+        if obs:
+            print(f"[CONTEXT] Observations so far:\n{obs}\n---")
+        print(f"[AI] Sending to {self.ai.model}...", flush=True)
         try:
             result = self.ai.reason_about_photo(messages)
         except Exception as e:
