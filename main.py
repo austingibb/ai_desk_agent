@@ -101,6 +101,7 @@ class Orchestrator:
     def _turn(self):
         tool_call_count = 0
         last_tool_name = None
+        nudged = False
 
         while self.running:
             local_tools = TOOL_DEFINITIONS if tool_call_count < MAX_TOOL_CALLS_PER_TURN else None
@@ -131,11 +132,11 @@ class Orchestrator:
                 print(f"[AI] {response['content'][:200]}")
 
             if not response["tool_calls"]:
-                if last_tool_name == "update_display":
-                    print("[PROMPT] No tool call after display update, nudging LLM to continue rhythm...")
+                if tool_call_count > 0 and not nudged:
+                    print("[PROMPT] No tool call after tool execution, nudging LLM to continue rhythm...")
                     with self.ctx_lock:
-                        self.ctx.add_user("Display is updated. Continue the rhythm — what's your next action?")
-                    last_tool_name = None
+                        self.ctx.add_user("Continue the rhythm — what's your next action?")
+                    nudged = True
                     continue
                 print("[IDLE] AI produced no tool calls. Waiting...")
                 self._idle_wait()
@@ -214,6 +215,8 @@ class Orchestrator:
     def _tool_wait(self, args: dict) -> dict:
         seconds = max(5, min(MAX_WAIT_SECONDS, args.get("seconds", 60)))
         print(f"[WAIT] Sleeping {seconds}s...")
+
+        self.chat_event.clear()
 
         start = time.monotonic()
         while time.monotonic() - start < seconds:
