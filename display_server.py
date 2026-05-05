@@ -34,11 +34,9 @@ class DisplayHandler(BaseHTTPRequestHandler):
         if self.path == "/health":
             self._send_json({"status": "ok", "display": display is not None})
         elif self.path.startswith("/buttons/check"):
-            yes_val = button_request.get_value(PIN_YES)
-            no_val = button_request.get_value(PIN_NO)
-            if yes_val == gpiod.line.Value.INACTIVE:
+            if not button_request.get_value(PIN_YES):
                 self._send_json({"pressed": True, "button": "YES"})
-            elif no_val == gpiod.line.Value.INACTIVE:
+            elif not button_request.get_value(PIN_NO):
                 self._send_json({"pressed": True, "button": "NO"})
             else:
                 self._send_json({"pressed": False})
@@ -81,10 +79,10 @@ class DisplayHandler(BaseHTTPRequestHandler):
     def _wait_and_respond(self, timeout: float):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if button_request.get_value(PIN_YES) == gpiod.line.Value.INACTIVE:
+            if not button_request.get_value(PIN_YES):
                 self._send_json({"response": "YES"})
                 return
-            if button_request.get_value(PIN_NO) == gpiod.line.Value.INACTIVE:
+            if not button_request.get_value(PIN_NO):
                 self._send_json({"response": "NO"})
                 return
             time.sleep(0.1)
