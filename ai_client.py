@@ -97,6 +97,13 @@ class AIClient:
 
         return self._stream_and_parse(adjusted, LLM_MAX_TOKENS_REASONING)
 
+    def consolidate(self, observations: str, previous_display: str) -> dict:
+        prompt = CONSOLIDATE_PROMPT.format(
+            observations=observations, previous_display=previous_display
+        )
+        messages = [{"role": "user", "content": prompt}]
+        return self._stream_and_parse(messages, LLM_MAX_TOKENS_CONSOLIDATE)
+
     def _stream_and_parse(self, messages: list, max_tokens: int) -> dict:
         resp = self._chat_stream(messages, max_tokens, temperature=0.7)
         content = []
