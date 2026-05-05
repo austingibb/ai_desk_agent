@@ -1,0 +1,17 @@
+[Unit]
+Description=AI E-Ink Roommate Orchestrator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=austingibb
+WorkingDirectory=/home/austingibb/ai_eink
+ExecStart=/home/austingibb/ai_eink/venv/bin/python main.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
