@@ -12,7 +12,7 @@ LLM_MAX_TOKENS_COMPACT = 1024
 LLM_TIMEOUT = 120
 
 # Context
-MAX_CONTEXT_TOKENS = 80000
+MAX_CONTEXT_TOKENS = 64000
 KEEP_LAST_N_MESSAGES = 30
 
 # Retained for backward compat with buttons.py
