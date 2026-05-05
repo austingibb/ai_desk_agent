@@ -2,6 +2,7 @@
 
 import io
 import base64
+from PIL import Image
 from picamera2 import Picamera2
 from config import CAMERA_WIDTH, CAMERA_HEIGHT, JPEG_QUALITY
 
@@ -16,13 +17,18 @@ class Camera:
         self.picam.start()
 
     def capture(self) -> tuple:
-        """Capture a photo. Returns (jpeg_bytes, base64_data_uri_string)."""
-        stream = io.BytesIO()
-        self.picam.capture_file(stream, format="jpeg", quality=JPEG_QUALITY)
-        jpeg_bytes = stream.getvalue()
-        b64 = base64.b64encode(jpeg_bytes).decode("utf-8")
-        data_uri = f"data:image/jpeg;base64,{b64}"
-        return jpeg_bytes, data_uri
+        request = self.picam.capture_request()
+        try:
+            arr = request.make_array("main")
+            img = Image.fromarray(arr)
+            stream = io.BytesIO()
+            img.save(stream, format="JPEG", quality=JPEG_QUALITY)
+            jpeg_bytes = stream.getvalue()
+            b64 = base64.b64encode(jpeg_bytes).decode("utf-8")
+            data_uri = f"data:image/jpeg;base64,{b64}"
+            return jpeg_bytes, data_uri
+        finally:
+            request.release()
 
     def close(self):
         self.picam.stop()

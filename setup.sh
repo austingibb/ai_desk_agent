@@ -4,10 +4,10 @@ echo "=== AI E-Ink Roommate — Pi 5 Camera + Orchestrator Setup ==="
 
 echo "=== Installing system packages ==="
 sudo apt-get update
-sudo apt-get install -y python3-pip python3-venv
+sudo apt-get install -y python3-pip python3-venv libcap-dev
 
 echo "=== Creating virtual environment ==="
-python3 -m venv venv
+python3 -m venv venv --system-site-packages
 
 echo "=== Installing Python packages ==="
 ./venv/bin/pip install -r requirements.txt

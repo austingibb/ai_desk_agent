@@ -14,7 +14,6 @@ from display import Display
 
 
 DISPLAY_LOCK = threading.Lock()
-BUTTON_LOCK = threading.Lock()
 display = None
 button_request = None
 
@@ -35,14 +34,14 @@ class DisplayHandler(BaseHTTPRequestHandler):
         if self.path == "/health":
             self._send_json({"status": "ok", "display": display is not None})
         elif self.path.startswith("/buttons/check"):
-            with BUTTON_LOCK:
-                ev = button_request.wait_edge_events(1) if button_request else False
-            if ev and ev is not False:
-                for e in ev:
-                    if e.event_type == gpiod.EdgeEvent.Type.FALLING_EDGE:
-                        self._send_json({"pressed": True, "button": "YES" if e.line_offset == PIN_YES else "NO"})
-                        return
-            self._send_json({"pressed": False})
+            yes_val = button_request.get_value(PIN_YES)
+            no_val = button_request.get_value(PIN_NO)
+            if yes_val == gpiod.line.Value.INACTIVE:
+                self._send_json({"pressed": True, "button": "YES"})
+            elif no_val == gpiod.line.Value.INACTIVE:
+                self._send_json({"pressed": True, "button": "NO"})
+            else:
+                self._send_json({"pressed": False})
         elif self.path.startswith("/buttons/wait"):
             timeout = BUTTON_RESPONSE_TIMEOUT
             if "?timeout=" in self.path:
@@ -82,28 +81,21 @@ class DisplayHandler(BaseHTTPRequestHandler):
     def _wait_and_respond(self, timeout: float):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            remaining = max(1, int((deadline - time.monotonic()) * 1000))
-            with BUTTON_LOCK:
-                ev = button_request.wait_edge_events(remaining)
-            if ev is False or ev is None:
-                continue
-            for e in ev:
-                if e.event_type == gpiod.EdgeEvent.Type.FALLING_EDGE:
-                    response = "YES" if e.line_offset == PIN_YES else "NO"
-                    self._send_json({"response": response})
-                    return
+            if button_request.get_value(PIN_YES) == gpiod.line.Value.INACTIVE:
+                self._send_json({"response": "YES"})
+                return
+            if button_request.get_value(PIN_NO) == gpiod.line.Value.INACTIVE:
+                self._send_json({"response": "NO"})
+                return
+            time.sleep(0.1)
         self._send_json({"response": None})
 
 
 def init_buttons():
-    global button_request
+    global yes_line, no_line, button_request
     cfg = {}
     for pin in (PIN_YES, PIN_NO):
-        cfg[pin] = gpiod.LineSettings(
-            direction=gpiod.line.Direction.INPUT,
-            bias=gpiod.line.Bias.PULL_UP,
-            edge_detection=gpiod.line.Edge.FALLING,
-        )
+        cfg[pin] = gpiod.LineSettings(direction=gpiod.line.Direction.INPUT, bias=gpiod.line.Bias.PULL_UP)
     button_request = gpiod.request_lines("/dev/gpiochip0", cfg, consumer="ai-eink-buttons")
     print("Buttons initialized.")
 

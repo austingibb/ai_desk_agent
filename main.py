@@ -91,7 +91,7 @@ class Orchestrator:
         if now - self.last_photo_time >= PHOTO_INTERVAL:
             self._photo_cycle(now)
 
-        time.sleep(1)
+        time.sleep(4)
 
     def _photo_cycle(self, now: float):
         self.last_photo_time = now
