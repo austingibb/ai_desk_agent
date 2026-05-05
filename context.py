@@ -24,6 +24,7 @@ class Context:
         self.last_photo_tokens = 0
         self.photo_width = 0
         self.photo_height = 0
+        self.total_photos = 0
 
     def add_system(self, content: str):
         self.messages.append({"role": "system", "content": content})
@@ -76,6 +77,7 @@ class Context:
         self.photo_width = photo_width
         self.photo_height = photo_height
         self.last_photo_tokens = estimate_image_tokens(photo_width, photo_height)
+        self.total_photos += 1
 
         merged = list(self.messages)
 
@@ -89,8 +91,10 @@ class Context:
                 f"Your observations so far this window:\n{reasoning_text}\n\n"
                 f"Observe this new photo and add your thoughts."
             )
-        else:
+        elif self.total_photos == 1:
             text = "Here is the first photo of the room. What do you observe?"
+        else:
+            text = "Here is the first photo of a new observation window. What do you observe?"
 
         merged.append({
             "role": "user",

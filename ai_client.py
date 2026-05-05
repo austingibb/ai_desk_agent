@@ -70,7 +70,11 @@ class AIClient:
         return result["content"]
 
     def reason_about_photo(self, messages: list) -> dict:
-        prompt = messages[-2]["content"] if len(messages) >= 2 else ""
+        last_content = messages[-1].get("content", "")
+        if isinstance(last_content, list):
+            prompt = next((p["text"] for p in last_content if p.get("type") == "text"), "")
+        else:
+            prompt = last_content
         has_prior = "Your observations so far this window" in prompt
 
         if has_prior:
@@ -87,10 +91,14 @@ class AIClient:
             )
         else:
             instruction = (
-                "You have received the first photo of a new observation window. "
-                "Observe the room and share your thoughts.\n\n"
+                "You have received a new photo. "
+                "Observe the room and share your thoughts. You may update the display if you wish.\n\n"
                 "Respond with:\n"
-                "REASONING: <your observations and thoughts>"
+                "REASONING: <your observations and thoughts>\n"
+                "DISPLAY: <yes/no>\n"
+                "MESSAGE: <display text, ~200 chars max, if DISPLAY is yes>\n"
+                "QUESTION: <yes/no question, only if you want to ask one>\n"
+                "WAIT: <seconds before you can speak again, 5-30>"
             )
 
         adjusted = list(messages)
