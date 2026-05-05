@@ -1,6 +1,7 @@
-"""Gemma4 API client — multimodal, reasoning-content support."""
+"""Gemma4 API client — multimodal, reasoning-content support with streaming."""
 
 import json
+import sys
 import requests
 from config import (
     LLM_BASE_URL,
@@ -42,6 +43,24 @@ class AIClient:
             "reasoning": msg.get("reasoning_content", "").strip(),
         }
 
+    def _chat_stream(self, messages: list, max_tokens: int, temperature: float = 0.7):
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": True,
+            "extra_body": {"reasoning_effort": "low"},
+        }
+        resp = requests.post(
+            f"{self.base_url}/chat/completions",
+            json=payload,
+            timeout=LLM_TIMEOUT,
+            stream=True,
+        )
+        resp.raise_for_status()
+        return resp
+
     def _simple_chat(self, user_content: str, system: str = None) -> str:
         messages = []
         if system:
@@ -76,25 +95,44 @@ class AIClient:
         adjusted = list(messages)
         adjusted[-2]["content"] += "\n\n" + instruction
 
-        result = self._chat(adjusted, max_tokens=LLM_MAX_TOKENS_REASONING)
-        parsed = self._parse_reasoning(result)
-        return parsed
+        return self._stream_and_parse(adjusted, LLM_MAX_TOKENS_REASONING)
 
-    def consolidate(self, observations: str, previous_display: str) -> dict:
-        prompt = CONSOLIDATE_PROMPT.format(
-            observations=observations, previous_display=previous_display
-        )
-        result = self._chat(
-            [{"role": "user", "content": prompt}],
-            max_tokens=LLM_MAX_TOKENS_CONSOLIDATE,
-            temperature=0.8,
-        )
-        return self._parse_consolidation(result)
+    def _stream_and_parse(self, messages: list, max_tokens: int) -> dict:
+        resp = self._chat_stream(messages, max_tokens, temperature=0.7)
+        content = []
+        reasoning = []
 
-    def _parse_reasoning(self, result: dict) -> dict:
-        content = result.get("content", "")
-        reasoning = result.get("reasoning", "")
+        for line in resp.iter_lines(decode_unicode=True):
+            if not line or not line.startswith("data: "):
+                continue
+            data_str = line[6:]
+            if data_str == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data_str)
+                choices = chunk.get("choices", [])
+                if choices:
+                    delta = choices[0].get("delta", {})
+                    rc = delta.get("reasoning_content", "")
+                    ct = delta.get("content", "")
+                    if rc:
+                        reasoning.append(rc)
+                        sys.stdout.write(rc)
+                        sys.stdout.flush()
+                    if ct:
+                        content.append(ct)
+                        if not reasoning:
+                            sys.stdout.write(ct)
+                            sys.stdout.flush()
+            except json.JSONDecodeError:
+                continue
 
+        full_content = "".join(content)
+        full_reasoning = "".join(reasoning)
+
+        return self._parse_raw(full_content, full_reasoning)
+
+    def _parse_raw(self, content: str, reasoning: str) -> dict:
         parsed = {
             "reasoning": reasoning or content[:500],
             "should_display": False,
@@ -120,32 +158,10 @@ class AIClient:
                     msg_text = msg_text.split("QUESTION:")[0]
                 parsed["display_text"] = msg_text.strip().strip('"').strip("'")
 
-        if "QUESTION:" in content:
-            q_parts = content.split("QUESTION:", 1)
+        if "QUESTION:" in content or "ASK:" in content:
+            q_key = "QUESTION:" if "QUESTION:" in content else "ASK:"
+            q_parts = content.split(q_key, 1)
             if len(q_parts) > 1:
                 parsed["question"] = q_parts[1].strip().strip('"').strip("'")
-
-        return parsed
-
-    def _parse_consolidation(self, result: dict) -> dict:
-        content = result.get("content", "")
-
-        parsed = {
-            "display_text": content[:200],
-            "question": "",
-        }
-
-        if "DISPLAY:" in content:
-            parts = content.split("DISPLAY:", 1)
-            if len(parts) > 1:
-                display = parts[1]
-                if "ASK:" in display:
-                    display = display.split("ASK:")[0]
-                parsed["display_text"] = display.strip().strip('"').strip("'")
-
-        if "ASK:" in content:
-            parts = content.split("ASK:", 1)
-            if len(parts) > 1:
-                parsed["question"] = parts[1].strip().strip('"').strip("'")
 
         return parsed
