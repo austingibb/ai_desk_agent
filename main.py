@@ -261,7 +261,7 @@ class Orchestrator:
                 }
             time.sleep(BUTTON_CHECK_INTERVAL)
 
-        self.backoff = min(self.backoff * 2, BACKOFF_MAX)
+        self.backoff = min(self.backoff * 3, BACKOFF_MAX)
         print(f"[WAIT] Completed. Next backoff: {self.backoff}s")
         return {"status": "ok", "waited": seconds}
 
