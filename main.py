@@ -34,7 +34,6 @@ LOG_FILE = "/home/austingibb/ai_eink/verbose.log"
 
 
 def log(msg: str):
-    print(msg)
     try:
         with open(LOG_FILE, "a") as f:
             f.write(msg + "\n")
