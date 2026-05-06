@@ -34,6 +34,12 @@ CHAT_SERVER_PORT = 8080
 BACKOFF_BASE = 10
 BACKOFF_MAX = 900
 
+# Notifications
+REVIEW_INTERVAL = int(os.environ.get("REVIEW_INTERVAL", "1800"))  # 30 minutes
+MAX_PROPOSAL_INTERVAL = 7200  # 2 hours — min time between proposals
+MAX_FIRINGS_PER_HOUR = 1
+CATEGORY_COOLDOWN_REVIEWS = 3  # after proposing in a category, skip it for N reviews
+
 # E-ink display (SSD1680Z, 122x250)
 DISPLAY_WIDTH = 250
 DISPLAY_HEIGHT = 122
@@ -92,7 +98,17 @@ CHAT INPUT:
 - After responding via update_display, call wait as usual so they have time to read and reply.
 
 BUTTON NUDGES:
-- If a button was pressed during your wait, the user wants to hear from you. Respond with a new thought, observation, or topic — don't just acknowledge the button, say something interesting."""
+- If a button was pressed during your wait, the user wants to hear from you. Respond with a new thought, observation, or topic — don't just acknowledge the button, say something interesting.
+
+NOTIFICATIONS:
+You can propose recurring notifications with propose_notification.
+- Only propose when the review prompt suggests a real pattern.
+- The user approves by pressing a button. They reject via chat ("no", "stop", etc).
+- Check category scores in the review prompt — negative means stop proposing that type.
+- Max 100 chars for notification messages. Keep them friendly and casual.
+- NEVER propose about: hygiene, weight, appearance, diet, relationships, or anything judgmental.
+- Good proposals: stretch reminders, break nudges, "it's getting late", weather alerts.
+- It's completely fine to never propose anything. Only propose genuinely useful things."""
 
 TOOL_DEFINITIONS = [
     {
@@ -138,6 +154,37 @@ TOOL_DEFINITIONS = [
                     },
                 },
                 "required": ["seconds"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "propose_notification",
+            "description": "Propose a recurring notification for the user. They will see it on the display and can approve (button press) or reject (via chat). Only propose when the review prompt suggests a pattern worth acting on.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message": {
+                        "type": "string",
+                        "description": "Notification text, max 100 chars, e-ink friendly (no emoji).",
+                    },
+                    "category": {
+                        "type": "string",
+                        "enum": ["health", "productivity", "time", "environment", "misc"],
+                        "description": "Category of the notification.",
+                    },
+                    "trigger_type": {
+                        "type": "string",
+                        "enum": ["interval", "time_of_day"],
+                        "description": "How the notification fires: on a repeating interval, or at a specific time daily.",
+                    },
+                    "trigger_value": {
+                        "type": "string",
+                        "description": "For interval: seconds between firings (e.g. '3600'). For time_of_day: 24h time (e.g. '14:30').",
+                    },
+                },
+                "required": ["message", "category", "trigger_type", "trigger_value"],
             },
         },
     },

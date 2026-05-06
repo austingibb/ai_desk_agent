@@ -3,7 +3,8 @@
     "allow": [
       "Bash(git add:*)",
       "Bash(git commit -m \"Fix display parsing: handle multi-line DISPLAY text, set should_display consistently, better fallbacks:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(ssh:*)"
     ]
   }
 }

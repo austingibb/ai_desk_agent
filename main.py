@@ -23,7 +23,11 @@ from config import (
     CHAT_SERVER_PORT,
     BACKOFF_BASE,
     BACKOFF_MAX,
+    REVIEW_INTERVAL,
+    MAX_PROPOSAL_INTERVAL,
+    CATEGORY_COOLDOWN_REVIEWS,
 )
+from notifications import NotificationStore
 from context import Context
 from camera import Camera
 from ai_client import AIClient
@@ -73,6 +77,11 @@ class Orchestrator:
         self.backoff = BACKOFF_BASE
         self.mcp_tools = []
         self.mcp = None
+        self.notification_store = NotificationStore()
+        self.last_review_time = time.time()
+        self.last_fired_notification_id = None
+        self.last_proposal_time = 0.0
+        self.proposal_category_cooldowns = {}
 
         try:
             print("Init MCP client...")
@@ -193,6 +202,9 @@ class Orchestrator:
         elif name == "wait":
             play_sound("wait")
             return self._tool_wait(args)
+        elif name == "propose_notification":
+            play_sound("update_display")
+            return self._tool_propose_notification(args)
         else:
             if self.mcp:
                 play_sound("search")
@@ -254,13 +266,53 @@ class Orchestrator:
             if not self.running:
                 return {"status": "interrupted", "reason": "shutdown", "waited": int(time.monotonic() - start)}
 
+            if time.time() - self.last_review_time > REVIEW_INTERVAL:
+                if self.backoff < 270:
+                    self.notification_store.expire_pending()
+                    self._tick_cooldowns()
+                    patterns = self._detect_patterns()
+                    cooldowns = {c: v for c, v in self.proposal_category_cooldowns.items() if v > 0}
+                    summary = self.notification_store.get_review_summary(
+                        patterns=patterns, cooldown_categories=cooldowns
+                    )
+                    with self.ctx_lock:
+                        self.ctx.add_user(summary)
+                    self.last_review_time = time.time()
+                    waited = int(time.monotonic() - start)
+                    print(f"[WAIT] Interrupted by notification review after {waited}s")
+                    return {"status": "interrupted", "reason": "notification_review", "waited": waited}
+
+            due = self.notification_store.get_due_notification()
+            if due:
+                if self.last_fired_notification_id:
+                    self.notification_store.decay_unacknowledged(self.last_fired_notification_id)
+                self.notification_store.record_firing(due["id"])
+                self.last_fired_notification_id = due["id"]
+                with self.ctx_lock:
+                    self.ctx.add_user(f'[Notification] Time to show: "{due["message"]}"')
+                self._reset_backoff()
+                waited = int(time.monotonic() - start)
+                print(f"[NOTIF] Due notification fired: {due['id']}")
+                return {"status": "interrupted", "reason": "notification_due", "waited": waited}
+
             result = http_get("/buttons/state", timeout=2)
             if result.get("button"):
                 self._reset_backoff()
                 http_post("/buttons/reset", {}, timeout=5)
                 waited = int(time.monotonic() - start)
-                with self.ctx_lock:
-                    self.ctx.add_user("The user pressed a button — they want you to say something!")
+
+                if self.notification_store.has_pending_proposal():
+                    approved = self.notification_store.approve_pending()
+                    with self.ctx_lock:
+                        self.ctx.add_user(f'The user approved your notification: "{approved["message"]}"')
+                    print(f"[NOTIF] Proposal approved: {approved['id']}")
+                else:
+                    if self.last_fired_notification_id:
+                        self.notification_store.record_acknowledgment(self.last_fired_notification_id)
+                        self.last_fired_notification_id = None
+                    with self.ctx_lock:
+                        self.ctx.add_user("The user pressed a button — they want you to say something!")
+
                 print(f"[WAIT] Interrupted by button press after {waited}s")
                 return {
                     "status": "interrupted",
@@ -274,6 +326,92 @@ class Orchestrator:
         print(f"[WAIT] Completed. Next backoff: {self.backoff}s")
         return {"status": "ok", "waited": seconds}
 
+    def _tool_propose_notification(self, args: dict) -> dict:
+        message = args.get("message", "")
+        category = args.get("category", "misc")
+        trigger_type = args.get("trigger_type", "interval")
+        trigger_value = args.get("trigger_value", "")
+
+        if not message.strip():
+            return {"status": "error", "message": "No message provided"}
+
+        if len(message) > 100:
+            return {"status": "error", "message": "Message too long (max 100 chars)"}
+
+        if self.notification_store.has_pending_proposal():
+            return {
+                "status": "error",
+                "message": "A proposal is already pending. Wait for the user to respond first.",
+            }
+
+        if time.time() - self.last_proposal_time < MAX_PROPOSAL_INTERVAL:
+            remaining = int(MAX_PROPOSAL_INTERVAL - (time.time() - self.last_proposal_time))
+            return {
+                "status": "error",
+                "message": f"Rate limited. Can propose again in {remaining}s.",
+            }
+
+        self.last_proposal_time = time.time()
+        notif = self.notification_store.create_proposal(
+            message, category, trigger_type, trigger_value
+        )
+        self.proposal_category_cooldowns[category] = CATEGORY_COOLDOWN_REVIEWS
+        print(f"[NOTIF] Proposal created: {notif['id']} — \"{message}\"")
+        return {
+            "status": "ok",
+            "message": f"Proposal saved. Now show it to the user with update_display: '{message} — press button to approve!'",
+        }
+
+    def _detect_patterns(self) -> str | None:
+        patterns = []
+        now = time.time()
+
+        with self.ctx_lock:
+            messages = self.ctx.messages
+
+        take_photo_times = []
+        user_event_times = []
+
+        for m in messages:
+            ts = m.get("_ts", 0)
+            role = m.get("role", "")
+
+            if role == "assistant":
+                for tc in m.get("tool_calls", []):
+                    if tc.get("function", {}).get("name") == "take_photo":
+                        take_photo_times.append(ts)
+            elif role == "user":
+                user_event_times.append(ts)
+
+        recent_photos = [t for t in take_photo_times if now - t < 5400]
+        if len(recent_photos) >= 3:
+            recent_chat = [t for t in user_event_times if recent_photos[0] <= t <= recent_photos[-1]]
+            if not recent_chat:
+                hours = (recent_photos[-1] - recent_photos[0]) / 3600
+                patterns.append(f"user at desk for {hours:.0f}+ hours")
+
+        local_hour = time.localtime().tm_hour
+        if local_hour >= 23 or local_hour < 6:
+            now_str = time.strftime("%-I:%M%p").lower().lstrip("0")
+            patterns.append(f"it's late ({now_str})")
+
+        if user_event_times:
+            last_event = max(user_event_times)
+        else:
+            last_event = 0
+        if now - last_event > 14400 and 8 <= local_hour < 22:
+            hours = (now - last_event) / 3600
+            patterns.append(f"no user interaction for {hours:.0f}+ hours")
+
+        return ", ".join(patterns) if patterns else None
+
+    def _tick_cooldowns(self):
+        expired = [c for c, v in self.proposal_category_cooldowns.items() if v <= 0]
+        for c in expired:
+            del self.proposal_category_cooldowns[c]
+        for c in list(self.proposal_category_cooldowns.keys()):
+            self.proposal_category_cooldowns[c] -= 1
+
     def _idle_wait(self):
         for _ in range(IDLE_TIMEOUT):
             if not self.running:
@@ -286,8 +424,21 @@ class Orchestrator:
             if result.get("button"):
                 self._reset_backoff()
                 http_post("/buttons/reset", {}, timeout=5)
-                with self.ctx_lock:
-                    self.ctx.add_user("The user pressed a button — they want you to say something!")
+
+                if self.notification_store.has_pending_proposal():
+                    approved = self.notification_store.approve_pending()
+                    with self.ctx_lock:
+                        self.ctx.add_user(
+                            f'The user approved your notification: "{approved["message"]}"'
+                        )
+                    print(f"[NOTIF] Proposal approved in idle: {approved['id']}")
+                else:
+                    if self.last_fired_notification_id:
+                        self.notification_store.record_acknowledgment(self.last_fired_notification_id)
+                        self.last_fired_notification_id = None
+                    with self.ctx_lock:
+                        self.ctx.add_user("The user pressed a button — they want you to say something!")
+
                 print("[IDLE] Interrupted by button press")
                 return
             time.sleep(1)
@@ -307,6 +458,10 @@ class Orchestrator:
         print("Cleaning up...")
         with self.ctx_lock:
             self.ctx.save()
+        try:
+            self.notification_store._save()
+        except Exception:
+            pass
         try:
             self.camera.close()
         except Exception:
@@ -369,6 +524,9 @@ NUDGE_PREFIXES = [
     "You just woke up!",
     "Here is the latest photo",
     "The user pressed a button",
+    "[Notification review]",
+    "[Notification]",
+    "The user approved your notification:",
 ]
 
 
@@ -448,6 +606,21 @@ class ChatHandler(BaseHTTPRequestHandler):
             return
 
         orch = ChatHandler.orchestrator
+
+        REJECTION_KEYWORDS = ["no", "nah", "don't", "stop", "cancel", "never", "quit", "not that"]
+
+        if orch.notification_store.has_pending_proposal():
+            msg_lower = message.lower()
+            if any(kw in msg_lower for kw in REJECTION_KEYWORDS):
+                rejected = orch.notification_store.reject_pending()
+                if rejected:
+                    orch.last_fired_notification_id = None
+                    print(f"[NOTIF] Proposal rejected via chat: {rejected['id']}")
+
+        if orch.last_fired_notification_id:
+            orch.notification_store.record_acknowledgment(orch.last_fired_notification_id)
+            orch.last_fired_notification_id = None
+
         with orch.ctx_lock:
             orch.ctx.add_user(message)
         orch.chat_event.set()
