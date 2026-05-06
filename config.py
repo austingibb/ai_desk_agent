@@ -1,13 +1,16 @@
 import os
+from dotenv import load_dotenv
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(PROJECT_DIR, ".env"))
 
 # Network
 DISPLAY_SERVER_URL = os.environ.get("DISPLAY_SERVER_URL", "http://192.168.0.38:5050")
 
-# Gemma4 API
+# LLM API (OpenAI-compatible)
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://192.168.0.4:8081/v1")
 LLM_MODEL = os.environ.get("LLM_MODEL", "gemma-4-31B-it-UD-Q4_K_XL.gguf")
+LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
 LLM_MAX_TOKENS_COMPACT = 1024
 LLM_TIMEOUT = 120
 

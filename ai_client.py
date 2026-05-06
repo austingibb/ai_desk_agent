@@ -1,4 +1,4 @@
-"""Gemma4 API client — tool-calling support via llama.cpp OpenAI-compatible endpoint."""
+"""LLM API client — tool-calling support via OpenAI-compatible endpoint."""
 
 import json
 import re
@@ -6,6 +6,7 @@ import requests
 from config import (
     LLM_BASE_URL,
     LLM_MODEL,
+    LLM_API_KEY,
     LLM_MAX_TOKENS,
     LLM_MAX_TOKENS_COMPACT,
     LLM_TIMEOUT,
@@ -54,6 +55,11 @@ class AIClient:
     def __init__(self):
         self.base_url = LLM_BASE_URL.rstrip("/")
         self.model = LLM_MODEL
+        self.api_key = LLM_API_KEY
+        self._is_gemma = "gemma" in self.model.lower()
+        self._headers = {}
+        if self.api_key:
+            self._headers["Authorization"] = f"Bearer {self.api_key}"
 
     def chat_with_tools(self, messages: list, tools: list = None) -> dict:
         payload = {
@@ -67,6 +73,7 @@ class AIClient:
 
         resp = requests.post(
             f"{self.base_url}/chat/completions",
+            headers=self._headers,
             json=payload,
             timeout=LLM_TIMEOUT,
         )
@@ -92,9 +99,11 @@ class AIClient:
                 "arguments": args,
             })
 
-        content = _clean(msg.get("content") or "")
+        raw_content = msg.get("content") or ""
+        content = _clean(raw_content) if self._is_gemma else raw_content.strip()
 
-        if not tool_calls:
+        # Gemma on llama.cpp sometimes emits tool calls as inline text
+        if not tool_calls and self._is_gemma:
             for m in INLINE_TOOL_RE.finditer(content):
                 name = m.group(1)
                 args = _parse_inline_args(m.group(2))
@@ -106,10 +115,11 @@ class AIClient:
             if tool_calls:
                 content = _clean(INLINE_TOOL_RE.sub("", content))
 
-        for tc in tool_calls:
-            for k, v in tc["arguments"].items():
-                if isinstance(v, str):
-                    tc["arguments"][k] = _clean(v)
+        if self._is_gemma:
+            for tc in tool_calls:
+                for k, v in tc["arguments"].items():
+                    if isinstance(v, str):
+                        tc["arguments"][k] = _clean(v)
 
         return {
             "content": content,
@@ -130,6 +140,7 @@ class AIClient:
         }
         resp = requests.post(
             f"{self.base_url}/chat/completions",
+            headers=self._headers,
             json=payload,
             timeout=LLM_TIMEOUT,
         )

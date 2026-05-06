@@ -1,3 +1,4 @@
 picamera2
 requests
 Pillow
+python-dotenv
