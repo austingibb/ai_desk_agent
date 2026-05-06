@@ -21,6 +21,7 @@ from config import (
     CAMERA_WIDTH,
     CAMERA_HEIGHT,
     CHAT_SERVER_PORT,
+    CHAT_MODE_TIMEOUT,
 )
 from context import Context
 from camera import Camera
@@ -69,6 +70,7 @@ class Orchestrator:
         self.last_display_time = 0
         self.chat_event = threading.Event()
         self.ctx_lock = threading.Lock()
+        self.last_user_interaction = 0.0
         self.mcp_tools = []
         self.mcp = None
 
@@ -87,6 +89,12 @@ class Orchestrator:
     def _handle_signal(self, signum, frame):
         print("\nShutting down...")
         self.running = False
+
+    def _in_chat_mode(self) -> bool:
+        return (time.monotonic() - self.last_user_interaction) < CHAT_MODE_TIMEOUT
+
+    def _touch_interaction(self):
+        self.last_user_interaction = time.monotonic()
 
     def run(self):
         print("Init camera...")
@@ -232,16 +240,25 @@ class Orchestrator:
     def _tool_poll_buttons(self) -> dict:
         result = http_get("/buttons/state", timeout=5)
         button = result.get("button")
+        if button:
+            self._touch_interaction()
         return {"pressed": button is not None, "button": button}
 
     def _tool_wait(self, args: dict) -> dict:
         seconds = max(5, min(MAX_WAIT_SECONDS, args.get("seconds", 60)))
+
+        if self._in_chat_mode():
+            time.sleep(0.25)
+            print(f"[WAIT] Chat mode — skipping {seconds}s wait")
+            return {"status": "interrupted", "reason": "chat_mode_active", "waited": 0}
+
         print(f"[WAIT] Sleeping {seconds}s...")
 
         start = time.monotonic()
         while time.monotonic() - start < seconds:
             if self.chat_event.is_set():
                 self.chat_event.clear()
+                self._touch_interaction()
                 waited = int(time.monotonic() - start)
                 print(f"[WAIT] Interrupted by chat message after {waited}s")
                 return {"status": "interrupted", "reason": "chat_message", "waited": waited}
@@ -251,6 +268,7 @@ class Orchestrator:
 
             result = http_get("/buttons/state", timeout=2)
             if result.get("button"):
+                self._touch_interaction()
                 waited = int(time.monotonic() - start)
                 return {
                     "status": "interrupted",
@@ -263,6 +281,11 @@ class Orchestrator:
         return {"status": "ok", "waited": seconds}
 
     def _idle_wait(self):
+        if self._in_chat_mode():
+            print("[IDLE] Chat mode — short pause before continuing")
+            time.sleep(2)
+            return
+
         for _ in range(IDLE_TIMEOUT):
             if not self.running:
                 return
@@ -425,6 +448,7 @@ class ChatHandler(BaseHTTPRequestHandler):
         with orch.ctx_lock:
             orch.ctx.add_user(message)
         orch.chat_event.set()
+        orch._touch_interaction()
         print(f"[CHAT] User message: {message[:100]}")
 
         data = json.dumps({"status": "ok"}).encode()
