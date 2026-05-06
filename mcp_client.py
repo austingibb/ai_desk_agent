@@ -49,7 +49,7 @@ class MCPClient:
         result = self._rpc("initialize", {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
-            "clientInfo": {"name": "ai-roommate", "version": "1.0"},
+            "clientInfo": {"name": "ai-friend", "version": "1.0"},
         })
         if "error" in result:
             raise RuntimeError(f"MCP initialize failed: {result['error']}")

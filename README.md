@@ -1,6 +1,6 @@
-# AI E-Ink Roommate
+# AI E-Ink Friend
 
-An autonomous AI roommate running on two Raspberry Pis — it watches the room, shares thoughts on an e-ink display, and chats with you.
+An autonomous AI friend running on two Raspberry Pis — it watches the room, shares thoughts on an e-ink display, and chats with you.
 
 ## Hardware
 

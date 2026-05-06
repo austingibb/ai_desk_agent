@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AI E-Ink Roommate — agent loop orchestrator. Runs on Pi 5 (192.168.0.39)."""
+"""AI E-Ink Friend — agent loop orchestrator. Runs on Pi 5 (192.168.0.39)."""
 
 import time
 import signal
@@ -308,7 +308,7 @@ class Orchestrator:
 
 CHAT_HTML = """<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AI Roommate Chat</title>
+<title>AI Friend Chat</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:system-ui,sans-serif;background:#1a1a2e;color:#e0e0e0;height:100vh;display:flex;flex-direction:column}
