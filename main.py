@@ -174,10 +174,8 @@ class Orchestrator:
             play_sound("take_photo")
             return self._tool_take_photo()
         elif name == "update_display":
-            result = self._tool_update_display(args)
-            if result.get("status") == "ok":
-                play_sound("update_display")
-            return result
+            play_sound("update_display")
+            return self._tool_update_display(args)
         elif name == "poll_buttons":
             return self._tool_poll_buttons()
         elif name == "wait":
