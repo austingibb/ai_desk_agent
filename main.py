@@ -249,6 +249,7 @@ class Orchestrator:
             result = http_get("/buttons/state", timeout=2)
             if result.get("button"):
                 self._reset_backoff()
+                http_post("/buttons/reset", {}, timeout=5)
                 waited = int(time.monotonic() - start)
                 with self.ctx_lock:
                     self.ctx.add_user("The user pressed a button — they want you to say something!")
@@ -276,6 +277,7 @@ class Orchestrator:
             result = http_get("/buttons/state", timeout=2)
             if result.get("button"):
                 self._reset_backoff()
+                http_post("/buttons/reset", {}, timeout=5)
                 with self.ctx_lock:
                     self.ctx.add_user("The user pressed a button — they want you to say something!")
                 print("[IDLE] Interrupted by button press")
