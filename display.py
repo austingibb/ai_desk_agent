@@ -78,14 +78,14 @@ class Display:
         image = Image.new("RGB", (self.width, self.height), color=self.WHITE)
         draw = ImageDraw.Draw(image)
 
-        margin = 8
+        margin = 4
         max_width = self.width - margin * 2
 
         lines = self._wrap_text(text, self.font_regular, max_width)
         y = margin
-        line_height = self.font_regular.getbbox("Tg")[3] + 2
+        line_height = self.font_regular.getbbox("Tg")[3] + 1
         for line in lines:
-            if y + line_height > self.height - margin:
+            if y + line_height > self.height:
                 break
             draw.text((margin, y), line, font=self.font_regular, fill=self.BLACK)
             y += line_height
