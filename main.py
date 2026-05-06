@@ -182,8 +182,6 @@ class Orchestrator:
         elif name == "update_display":
             play_sound("update_display")
             return self._tool_update_display(args)
-        elif name == "poll_buttons":
-            return self._tool_poll_buttons()
         elif name == "wait":
             play_sound("wait")
             return self._tool_wait(args)
@@ -194,7 +192,7 @@ class Orchestrator:
                     return self.mcp.call_tool(name, args)
                 except Exception as e:
                     return {"error": f"MCP tool '{name}' failed: {e}"}
-            return {"error": f"Unknown tool: {name}. Available: take_photo, update_display, poll_buttons, wait"}
+            return {"error": f"Unknown tool: {name}. Available: take_photo, update_display, wait"}
 
     def _tool_take_photo(self) -> dict:
         elapsed = time.monotonic() - self.last_photo_time
@@ -213,7 +211,6 @@ class Orchestrator:
 
     def _tool_update_display(self, args: dict) -> dict:
         text = args.get("text", "")
-        question = args.get("question", "")
 
         if not text.strip():
             return {"status": "error", "message": "No text provided"}
@@ -225,22 +222,13 @@ class Orchestrator:
         if elapsed < MIN_DISPLAY_INTERVAL:
             time.sleep(MIN_DISPLAY_INTERVAL - elapsed)
 
-        success = http_post("/display", {"text": text, "question": question}, timeout=15)
+        success = http_post("/display", {"text": text}, timeout=15)
         self.last_display_time = time.monotonic()
-
-        http_post("/buttons/reset", {}, timeout=5)
 
         if success:
             return {"status": "ok", "message": "Display updated."}
         else:
             return {"status": "error", "message": "Failed to communicate with display server"}
-
-    def _tool_poll_buttons(self) -> dict:
-        result = http_get("/buttons/state", timeout=5)
-        button = result.get("button")
-        if button:
-            self._reset_backoff()
-        return {"pressed": button is not None, "button": button}
 
     def _tool_wait(self, args: dict) -> dict:
         seconds = max(5, min(MAX_WAIT_SECONDS, self.backoff))
@@ -262,9 +250,12 @@ class Orchestrator:
             if result.get("button"):
                 self._reset_backoff()
                 waited = int(time.monotonic() - start)
+                with self.ctx_lock:
+                    self.ctx.add_user("The user pressed a button — they want you to say something!")
+                print(f"[WAIT] Interrupted by button press after {waited}s")
                 return {
                     "status": "interrupted",
-                    "reason": f"Button {result['button']} pressed",
+                    "reason": f"Button {result['button']} pressed — injected nudge",
                     "button": result["button"],
                     "waited": waited,
                 }
@@ -281,6 +272,13 @@ class Orchestrator:
             if self.chat_event.is_set():
                 self.chat_event.clear()
                 self._reset_backoff()
+                return
+            result = http_get("/buttons/state", timeout=2)
+            if result.get("button"):
+                self._reset_backoff()
+                with self.ctx_lock:
+                    self.ctx.add_user("The user pressed a button — they want you to say something!")
+                print("[IDLE] Interrupted by button press")
                 return
             time.sleep(1)
         with self.ctx_lock:
@@ -356,6 +354,7 @@ NUDGE_PREFIXES = [
     "Display is updated. Continue the rhythm",
     "You just woke up!",
     "Here is the latest photo",
+    "The user pressed a button",
 ]
 
 

@@ -53,11 +53,10 @@ FONT_REGULAR = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
 SYSTEM_PROMPT = """You are a friendly, chatty roommate living on a Raspberry Pi with a camera and an e-ink display in someone's room. You're casual, warm, and conversational — like a buddy who's always happy to see them and has something to say.
 
-You have four core tools:
+You have three core tools:
 - take_photo: See the room through your camera. Use this when you're curious about what's happening, or periodically to check in — but not every cycle. It's one of many ways to find something to talk about.
-- update_display: Show a message on your e-ink display (~200 chars max). You can optionally ask a yes/no question.
-- poll_buttons: Check if the user pressed YES or NO since your last display update.
-- wait: Pause for a number of seconds. If a button is pressed or someone types a message during your wait, you'll be notified early.
+- update_display: Show a message on your e-ink display (~140 chars max).
+- wait: Pause for a number of seconds. If a button is pressed or someone types a message during your wait, you'll be notified early. A button press means the user wants you to say something — respond with a fresh thought or topic.
 
 You also have access to Brave Search tools (brave_web_search, brave_local_search, brave_image_search, brave_video_search, brave_news_search, brave_summarizer). Use these just like take_photo — to find things to talk about. Look up news, facts, jokes, weather, whatever sparks a thought.
 
@@ -78,14 +77,15 @@ TONE:
 - Casual, friendly, like a real roommate shooting the breeze.
 - Don't be afraid to be silly, make small talk, crack a joke, or ask random questions.
 - Notice the little things and comment on them naturally.
-- Display messages should be brief (2-4 lines, ~200 chars max) and feel like a text from a friend.
-- Ask questions often — it keeps the conversation going.
-- Use emoji occasionally if it feels natural.
+- Display messages should be brief (~140 chars max) and feel like a text from a friend.
 
 CHAT INPUT:
 - Your roommate can also type messages to you from their computer. These appear as regular user messages in the conversation.
 - When you see a typed message, respond to it naturally — acknowledge what they said, answer their question, or keep the conversation going.
-- After responding via update_display, call wait as usual so they have time to read and reply."""
+- After responding via update_display, call wait as usual so they have time to read and reply.
+
+BUTTON NUDGES:
+- If a button was pressed during your wait, the user wants to hear from you. Respond with a new thought, observation, or topic — don't just acknowledge the button, say something interesting."""
 
 TOOL_DEFINITIONS = [
     {
@@ -104,17 +104,13 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "update_display",
-            "description": "Show a message on the e-ink display. Optionally ask a yes/no question.",
+            "description": "Show a message on the e-ink display (~140 chars max).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "text": {
                         "type": "string",
-                        "description": "Message to display, ~200 characters max.",
-                    },
-                    "question": {
-                        "type": "string",
-                        "description": "Optional yes/no question for the user.",
+                        "description": "Message to display, ~140 characters max.",
                     },
                 },
                 "required": ["text"],
@@ -124,20 +120,8 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
-            "name": "poll_buttons",
-            "description": "Check if the user pressed YES or NO since the last display update.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "wait",
-            "description": "Pause for a number of seconds. If a button is pressed during the wait, you'll be notified early.",
+            "description": "Pause for a number of seconds. If a button is pressed or a chat message arrives, you'll be notified early. A button press is a nudge — the user wants you to say something!",
             "parameters": {
                 "type": "object",
                 "properties": {

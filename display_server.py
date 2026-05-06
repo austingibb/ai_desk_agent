@@ -78,11 +78,10 @@ class DisplayHandler(BaseHTTPRequestHandler):
                 return
 
             text = data.get("text", "")
-            question = data.get("question", "")
 
             with DISPLAY_LOCK:
                 try:
-                    display.show_text(text, question=question if question else None)
+                    display.show_text(text)
                     self._send_json({"status": "ok"})
                 except Exception as e:
                     self._send_json({"error": str(e)}, 500)

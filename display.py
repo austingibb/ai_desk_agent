@@ -67,8 +67,7 @@ class Display:
             lines.append(current)
         return lines if lines else [text]
 
-    def show_text(self, text: str, question: str = None):
-        # Guard against too-rapid refreshes which can lock up e-ink
+    def show_text(self, text: str):
         elapsed = time.monotonic() - self._last_refresh
         if elapsed < MIN_REFRESH_INTERVAL:
             wait = MIN_REFRESH_INTERVAL - elapsed
@@ -86,15 +85,10 @@ class Display:
         y = margin
         line_height = self.font_regular.getbbox("Tg")[3] + 2
         for line in lines:
-            if y + line_height > self.height - 30:
+            if y + line_height > self.height - margin:
                 break
             draw.text((margin, y), line, font=self.font_regular, fill=self.BLACK)
             y += line_height
-
-        if question:
-            y = self.height - 24
-            q_prefix = f"[YES]  {question}  [NO]"
-            draw.text((margin, y), q_prefix, font=self.font_small, fill=self.BLACK)
 
         self.epd.image(image)
         self.epd.display()
