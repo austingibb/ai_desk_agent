@@ -326,10 +326,8 @@ button:hover{background:#c73e54}
 <div id="messages"></div>
 <form id="form"><input id="input" placeholder="Say something..." autocomplete="off"><button type="submit">Send</button></form>
 <script>
-let lastLen=0;
 const div=document.getElementById('messages');
 function render(msgs){
-  lastLen=msgs.length;
   div.innerHTML=msgs.map(m=>`<div class="msg ${m.role}"><div class="role">${m.role}</div>${m.content.replace(/</g,'&lt;')}</div>`).join('');
   div.scrollTop=div.scrollHeight;
 }
@@ -337,7 +335,6 @@ async function refresh(){
   try{
     const r=await fetch('/chat');
     const msgs=await r.json();
-    if(msgs.length===lastLen)return;
     render(msgs);
   }catch(e){}
 }
@@ -353,8 +350,7 @@ document.getElementById('form').onsubmit=async e=>{
   if(resp.ok){
     div.insertAdjacentHTML('beforeend',`<div class="msg user"><div class="role">user</div>${msg.replace(/</g,'&lt;')}</div>`);
     div.scrollTop=div.scrollHeight;
-    lastLen=0;
-    setTimeout(refresh,300);
+    setTimeout(refresh,500);
   }
 };
 </script></body></html>"""
