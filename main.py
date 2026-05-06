@@ -26,6 +26,7 @@ from context import Context
 from camera import Camera
 from ai_client import AIClient
 from mcp_client import MCPClient
+from sounds import play as play_sound
 
 LOG_FILE = "/home/austingibb/ai_eink/verbose.log"
 
@@ -124,6 +125,7 @@ class Orchestrator:
                 messages = self.ctx.get_messages()
                 tokens = self.ctx.total_tokens()
             print(f"[LLM] Sending {len(messages)} messages (~{tokens} tokens)...")
+            play_sound("thinking")
             try:
                 response = self.ai.chat_with_tools(messages, tools)
             except Exception as e:
@@ -169,15 +171,21 @@ class Orchestrator:
 
     def _execute_tool(self, name: str, args: dict) -> dict:
         if name == "take_photo":
+            play_sound("take_photo")
             return self._tool_take_photo()
         elif name == "update_display":
-            return self._tool_update_display(args)
+            result = self._tool_update_display(args)
+            if result.get("status") == "ok":
+                play_sound("update_display")
+            return result
         elif name == "poll_buttons":
             return self._tool_poll_buttons()
         elif name == "wait":
+            play_sound("wait")
             return self._tool_wait(args)
         else:
             if self.mcp:
+                play_sound("search")
                 try:
                     return self.mcp.call_tool(name, args)
                 except Exception as e:
