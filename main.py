@@ -171,6 +171,15 @@ class Orchestrator:
                 with self.ctx_lock:
                     self.ctx.add_tool_result(tc["id"], tc["name"], result)
 
+                if tc["name"] == "update_display" and result.get("status") == "ok":
+                    wait_result = self._tool_wait({})
+                    print(f"[WAIT ENFORCED] display updated + wait ({wait_result.get('waited', 0)}s)")
+                    with self.ctx_lock:
+                        self.ctx.add_tool_result(
+                            f"_forced_wait_{int(time.time())}", "wait", wait_result
+                        )
+                    break
+
             with self.ctx_lock:
                 self.ctx.check_compact(self.ai)
 
