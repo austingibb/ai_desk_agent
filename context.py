@@ -135,6 +135,14 @@ class Context:
                 total += len(json.dumps(tc)) // 4
         return total
 
+    @staticmethod
+    def _is_summary(msg: dict) -> bool:
+        """Check if a message is an existing compaction summary."""
+        content = msg.get("content", "")
+        if not isinstance(content, str):
+            return False
+        return content.startswith("[Previous context summary:")
+
     def check_compact(self, ai_client):
         if len(self.messages) < COMPACT_AFTER_N_MESSAGES:
             return
@@ -148,7 +156,17 @@ class Context:
         if end <= start:
             return
 
-        to_compact = self.messages[start:end]
+        window = self.messages[start:end]
+
+        existing_summaries = [m for m in window if self._is_summary(m)]
+        to_compact = [m for m in window if not self._is_summary(m)]
+
+        if not to_compact:
+            return
+
+        ts_min = min(m.get("_ts", self._now()) for m in to_compact)
+        ts_max = max(m.get("_ts", self._now()) for m in to_compact)
+        date_label = f"{_ts_fmt(ts_min)} \u2013 {_ts_fmt(ts_max)}"
 
         text_parts = []
         for m in to_compact:
@@ -178,14 +196,16 @@ class Context:
         new_messages = []
         if system_msg:
             new_messages.append(system_msg)
+        new_messages.extend(existing_summaries)
         new_messages.append({
             "role": "user",
-            "content": f"[Previous context summary: {summary}]",
+            "content": f"[Previous context summary: {date_label}] {summary}",
             "_ts": self._now(),
         })
         new_messages.extend(self.messages[end:])
         self.messages = new_messages
-        print(f"[CONTEXT] Compacted {len(to_compact)} messages into 1 summary (~{len(summary)} chars), keeping last {keep_count}")
+        print(f"[CONTEXT] Compacted {len(to_compact)} messages into 1 summary (~{len(summary)} chars) [{date_label}], "
+              f"preserved {len(existing_summaries)} prior summaries, keeping last {keep_count}")
 
     def _is_image_message(self, msg: dict) -> bool:
         content = msg.get("content", "")
