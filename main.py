@@ -325,15 +325,18 @@ button:hover{background:#c73e54}
 <form id="form"><input id="input" placeholder="Say something..." autocomplete="off"><button type="submit">Send</button></form>
 <script>
 let lastLen=0;
+const div=document.getElementById('messages');
+function render(msgs){
+  lastLen=msgs.length;
+  div.innerHTML=msgs.map(m=>`<div class="msg ${m.role}"><div class="role">${m.role}</div>${m.content.replace(/</g,'&lt;')}</div>`).join('');
+  div.scrollTop=div.scrollHeight;
+}
 async function refresh(){
   try{
     const r=await fetch('/chat');
     const msgs=await r.json();
     if(msgs.length===lastLen)return;
-    lastLen=msgs.length;
-    const div=document.getElementById('messages');
-    div.innerHTML=msgs.map(m=>`<div class="msg ${m.role}"><div class="role">${m.role}</div>${m.content.replace(/</g,'&lt;')}</div>`).join('');
-    div.scrollTop=div.scrollHeight;
+    render(msgs);
   }catch(e){}
 }
 setInterval(refresh,2000);
@@ -344,8 +347,13 @@ document.getElementById('form').onsubmit=async e=>{
   const msg=inp.value.trim();
   if(!msg)return;
   inp.value='';
-  await fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg})});
-  refresh();
+  const resp=await fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg})});
+  if(resp.ok){
+    div.insertAdjacentHTML('beforeend',`<div class="msg user"><div class="role">user</div>${msg.replace(/</g,'&lt;')}</div>`);
+    div.scrollTop=div.scrollHeight;
+    lastLen=0;
+    setTimeout(refresh,300);
+  }
 };
 </script></body></html>"""
 
