@@ -1,10 +1,15 @@
-"""Conversation context manager with token estimation and automatic compaction."""
+"""Conversation context manager with timestamped messages and message-count-based compaction."""
 
 import json
 import os
-from config import MAX_CONTEXT_TOKENS, KEEP_LAST_N_MESSAGES, PROJECT_DIR
+import time as _time
+from config import COMPACT_AFTER_N_MESSAGES, KEEP_LAST_N_MESSAGES, PROJECT_DIR
 
 CONTEXT_FILE = os.path.join(PROJECT_DIR, "context.json")
+
+
+def _ts_fmt(ts: float) -> str:
+    return _time.strftime("[%a %H:%M:%S]", _time.localtime(ts))
 
 
 class Context:
@@ -32,17 +37,24 @@ class Context:
         try:
             with open(CONTEXT_FILE, "r") as f:
                 self.messages = json.load(f)
+            now = _time.time()
+            for m in self.messages:
+                if "_ts" not in m:
+                    m["_ts"] = now
             print(f"[CONTEXT] Loaded {len(self.messages)} messages from {CONTEXT_FILE}")
             return True
         except Exception as e:
             print(f"[CONTEXT] Load error: {e}")
             return False
 
+    def _now(self) -> float:
+        return _time.time()
+
     def add_system(self, content: str):
-        self.messages.append({"role": "system", "content": content})
+        self.messages.append({"role": "system", "content": content, "_ts": self._now()})
 
     def add_user(self, content: str):
-        self.messages.append({"role": "user", "content": content})
+        self.messages.append({"role": "user", "content": content, "_ts": self._now()})
 
     def add_image(self, photo_uri: str):
         self.messages = [m for m in self.messages if not self._is_image_message(m)]
@@ -52,6 +64,7 @@ class Context:
                 {"type": "text", "text": "Here is the latest photo from the camera."},
                 {"type": "image_url", "image_url": {"url": photo_uri}},
             ],
+            "_ts": self._now(),
         })
 
     def add_assistant(self, response: dict):
@@ -61,7 +74,7 @@ class Context:
         if not tool_calls:
             return
 
-        msg = {"role": "assistant"}
+        msg = {"role": "assistant", "_ts": self._now()}
         if content:
             msg["content"] = content
         else:
@@ -85,10 +98,26 @@ class Context:
             "tool_call_id": tool_call_id,
             "name": name,
             "content": json.dumps(result),
+            "_ts": self._now(),
         })
 
     def get_messages(self) -> list:
-        return list(self.messages)
+        result = []
+        for m in self.messages:
+            msg = dict(m)
+            ts = msg.pop("_ts", None)
+            if ts and msg.get("role") != "system":
+                ts_str = _ts_fmt(ts)
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    msg["content"] = f"{ts_str} {content}"
+                elif isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") == "text":
+                            part["text"] = f"{ts_str} {part['text']}"
+                            break
+            result.append(msg)
+        return result
 
     def total_tokens(self) -> int:
         total = 0
@@ -107,23 +136,27 @@ class Context:
         return total
 
     def check_compact(self, ai_client):
-        if self.total_tokens() < MAX_CONTEXT_TOKENS * 0.7:
+        if len(self.messages) < COMPACT_AFTER_N_MESSAGES:
             return
 
         system_msg = self.messages[0] if self.messages and self.messages[0]["role"] == "system" else None
         keep_count = KEEP_LAST_N_MESSAGES
 
-        if len(self.messages) <= keep_count + (1 if system_msg else 0):
-            return
-
         start = 1 if system_msg else 0
         end = len(self.messages) - keep_count
+
+        if end <= start:
+            return
+
         to_compact = self.messages[start:end]
 
         text_parts = []
         for m in to_compact:
             role = m.get("role", "?")
             content = m.get("content", "")
+            ts = m.get("_ts", 0)
+            ts_str = _ts_fmt(ts)
+
             if isinstance(content, list):
                 content = " ".join(
                     p.get("text", "") for p in content
@@ -134,7 +167,7 @@ class Context:
                 content = f"[called tools: {tools}] {content}"
             if role == "tool":
                 content = f"[tool result for {m.get('name', '?')}] {content}"
-            text_parts.append(f"{role}: {content}")
+            text_parts.append(f"{ts_str} {role}: {content}")
 
         combined = "\n".join(text_parts)
         try:
@@ -145,9 +178,14 @@ class Context:
         new_messages = []
         if system_msg:
             new_messages.append(system_msg)
-        new_messages.append({"role": "user", "content": f"[Previous context summary: {summary}]"})
+        new_messages.append({
+            "role": "user",
+            "content": f"[Previous context summary: {summary}]",
+            "_ts": self._now(),
+        })
         new_messages.extend(self.messages[end:])
         self.messages = new_messages
+        print(f"[CONTEXT] Compacted {len(to_compact)} messages into 1 summary (~{len(summary)} chars), keeping last {keep_count}")
 
     def _is_image_message(self, msg: dict) -> bool:
         content = msg.get("content", "")

@@ -130,7 +130,7 @@ class AIClient:
 
     def compact(self, text: str) -> str:
         messages = [
-            {"role": "user", "content": f"Summarize these observations and interactions concisely, preserving key events and patterns:\n\n{text}"}
+            {"role": "user", "content": f"Summarize these observations and interactions concisely, preserving key events, decisions, and patterns. Pay attention to timestamps to understand the sequence and timing of events:\n\n{text}"}
         ]
         payload = {
             "model": self.model,
