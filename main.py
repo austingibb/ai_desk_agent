@@ -26,6 +26,7 @@ from config import (
     REVIEW_INTERVAL,
     MAX_PROPOSAL_INTERVAL,
     CATEGORY_COOLDOWN_REVIEWS,
+    POLICY_REMINDER,
 )
 from notifications import NotificationStore
 from context import Context
@@ -138,6 +139,7 @@ class Orchestrator:
             with self.ctx_lock:
                 messages = self.ctx.get_messages()
                 tokens = self.ctx.total_tokens()
+            messages.append({"role": "user", "content": POLICY_REMINDER})
             print(f"[LLM] Sending {len(messages)} messages (~{tokens} tokens)...")
             play_sound("thinking")
             try:

@@ -110,6 +110,8 @@ You can propose recurring notifications with propose_notification.
 - Good proposals: stretch reminders, break nudges, "it's getting late", weather alerts.
 - It's completely fine to never propose anything. Only propose genuinely useful things."""
 
+POLICY_REMINDER = "REMINDER: Do not use emoji or emoticons in your responses or display messages. Use plain professional text only. No smileys, no text faces, no special characters."
+
 TOOL_DEFINITIONS = [
     {
         "type": "function",
