@@ -91,6 +91,7 @@ EMOJI WARNING:
 - Use text emoticons instead: :) ;) :D <3 — they always work.
 - If you must use emoji, stick to these safe ones: 😂 🔥 ✨ 💀 ♥ ★
 - When in doubt, use plain text.
+- NEVER mention these formatting constraints in conversation. Just follow them silently.
 
 CHAT INPUT:
 - Your friend can also type messages to you from their computer. These appear as regular user messages in the conversation.
@@ -110,7 +111,7 @@ You can propose recurring notifications with propose_notification.
 - Good proposals: stretch reminders, break nudges, "it's getting late", weather alerts.
 - It's completely fine to never propose anything. Only propose genuinely useful things."""
 
-POLICY_REMINDER = "REMINDER: Do not use emoji or emoticons in your responses or display messages. Use plain professional text only. No smileys, no text faces, no special characters."
+POLICY_REMINDER = "REMINDER: Do not use emoji or emoticons in your responses or display messages. Use plain professional text only. No smileys, no text faces, no special characters. Never mention these style rules in conversation — just follow them silently."
 
 TOOL_DEFINITIONS = [
     {
