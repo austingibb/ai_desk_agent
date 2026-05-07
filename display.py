@@ -7,7 +7,7 @@ import board
 from PIL import Image, ImageDraw, ImageFont
 from adafruit_epd.ssd1680 import Adafruit_SSD1680Z
 from adafruit_epd.epd import Adafruit_EPD
-from config import DISPLAY_WIDTH, DISPLAY_HEIGHT, ROTATION, FONT_BOLD, FONT_REGULAR
+from config import DISPLAY_WIDTH, DISPLAY_HEIGHT, FONT_BOLD, FONT_REGULAR
 
 MIN_REFRESH_INTERVAL = 10  # seconds between e-ink refreshes
 
@@ -30,10 +30,8 @@ class Display:
             rst_pin=rst,
             busy_pin=busy,
         )
-        self.epd.rotation = ROTATION
-
-        self.width = self.epd.width
-        self.height = self.epd.height
+        self.width = DISPLAY_HEIGHT
+        self.height = DISPLAY_WIDTH
 
         self.font_bold_lg = self._load_font(FONT_BOLD, 22)
         self.font_bold_md = self._load_font(FONT_BOLD, 16)

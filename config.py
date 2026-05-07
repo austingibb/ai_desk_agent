@@ -43,7 +43,7 @@ CATEGORY_COOLDOWN_REVIEWS = 3  # after proposing in a category, skip it for N re
 # E-ink display (SSD1680Z, 122x250)
 DISPLAY_WIDTH = 250
 DISPLAY_HEIGHT = 122
-ROTATION = 1
+ROTATION = 0
 
 # GPIO pins (BCM numbering)
 PIN_YES = 5
