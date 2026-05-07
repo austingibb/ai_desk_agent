@@ -171,9 +171,14 @@ class NotificationStore:
                     if last
                     else "never"
                 )
-                unit = "min" if n["trigger_type"] == "interval" else ""
+                if n["trigger_type"] == "interval":
+                    val = str(int(n["trigger_value"]) // 60)
+                    unit = "min"
+                else:
+                    val = n["trigger_value"]
+                    unit = ""
                 lines.append(
-                    f'"{n["message"]}" ({n["category"]}, every {n["trigger_value"]}{unit}, last fired {last_str})'
+                    f'"{n["message"]}" ({n["category"]}, every {val}{unit}, last fired {last_str})'
                 )
             parts.append(f"Active notifications ({len(active)}): {', '.join(lines)}.")
 
