@@ -212,6 +212,9 @@ class Orchestrator:
                 log(f"[TOOL RESULT] {json.dumps(result)}")
                 with self.ctx_lock:
                     self.ctx.add_tool_result(tc["id"], tc["name"], result)
+                    user_msg = result.get("user_message")
+                    if user_msg:
+                        self.ctx.add_user(user_msg)
 
                 if tc["name"] == "update_display" and result.get("status") == "ok":
                     wait_result = self._tool_wait({})
@@ -228,6 +231,9 @@ class Orchestrator:
                                     "function": {"name": "wait", "arguments": "{}"},
                                 })
                         self.ctx.add_tool_result(wait_id, "wait", wait_result)
+                        wait_user_msg = wait_result.get("user_message")
+                        if wait_user_msg:
+                            self.ctx.add_user(wait_user_msg)
                     break
 
             with self.ctx_lock:
@@ -318,12 +324,10 @@ class Orchestrator:
                     summary = self.notification_store.get_review_summary(
                         patterns=patterns, cooldown_categories=cooldowns
                     )
-                    with self.ctx_lock:
-                        self.ctx.add_user(summary)
                     self.last_review_time = time.time()
                     waited = int(time.monotonic() - start)
                     print(f"[WAIT] Interrupted by notification review after {waited}s")
-                    return {"status": "interrupted", "reason": "notification_review", "waited": waited}
+                    return {"status": "interrupted", "reason": "notification_review", "waited": waited, "user_message": summary}
 
             due = self.notification_store.get_due_notification()
             if due:
@@ -331,12 +335,10 @@ class Orchestrator:
                     self.notification_store.decay_unacknowledged(self.last_fired_notification_id)
                 self.notification_store.record_firing(due["id"])
                 self.last_fired_notification_id = due["id"]
-                with self.ctx_lock:
-                    self.ctx.add_user(f'[Notification] Time to show: "{due["message"]}"')
                 self._reset_backoff()
                 waited = int(time.monotonic() - start)
                 print(f"[NOTIF] Due notification fired: {due['id']}")
-                return {"status": "interrupted", "reason": "notification_due", "waited": waited}
+                return {"status": "interrupted", "reason": "notification_due", "waited": waited, "user_message": f'[Notification] Time to show: "{due["message"]}"'}
 
             result = http_get("/buttons/state", timeout=2)
             if result.get("button"):
@@ -346,15 +348,13 @@ class Orchestrator:
 
                 if self.notification_store.has_pending_proposal():
                     approved = self.notification_store.approve_pending()
-                    with self.ctx_lock:
-                        self.ctx.add_user(f'The user approved your notification: "{approved["message"]}"')
                     print(f"[NOTIF] Proposal approved: {approved['id']}")
+                    user_msg = f'The user approved your notification: "{approved["message"]}"'
                 else:
                     if self.last_fired_notification_id:
                         self.notification_store.record_acknowledgment(self.last_fired_notification_id)
                         self.last_fired_notification_id = None
-                    with self.ctx_lock:
-                        self.ctx.add_user("The user pressed a button — they want you to say something!")
+                    user_msg = "The user pressed a button — they want you to say something!"
 
                 print(f"[WAIT] Interrupted by button press after {waited}s")
                 return {
@@ -362,6 +362,7 @@ class Orchestrator:
                     "reason": f"Button {result['button']} pressed — injected nudge",
                     "button": result["button"],
                     "waited": waited,
+                    "user_message": user_msg,
                 }
             time.sleep(BUTTON_CHECK_INTERVAL)
 
