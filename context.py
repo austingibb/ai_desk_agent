@@ -49,7 +49,12 @@ class Context:
             return False
 
     def _repair_pairing(self) -> int:
-        """Remove orphan tool messages and dangling tool_calls to satisfy OpenAI pairing rules.
+        """Remove messages that violate OpenAI assistant/tool pairing rules.
+        
+        Two violations fixed:
+        1. Tool messages without a preceding assistant tool_calls entry (orphan tools)
+        2. Non-tool messages sandwiched between an assistant with tool_calls
+           and its tool results (OpenRouter requires tool to immediately follow assistant)
         
         Returns the number of repairs made.
         """
@@ -63,16 +68,21 @@ class Context:
                 cleaned.append(m)
             elif role == "tool":
                 tid = m.get("tool_call_id", "")
-                if tid in pending_ids:
+                if pending_ids and tid in pending_ids:
                     pending_ids.discard(tid)
                     cleaned.append(m)
+                    if not pending_ids:
+                        pending_ids = set()
                 else:
                     repairs += 1
+            elif pending_ids:
+                repairs += 1
             else:
                 cleaned.append(m)
         if repairs:
             self.messages = cleaned
-            print(f"[CONTEXT] Repaired {repairs} orphan messages")
+            print(f"[CONTEXT] Repaired {repairs} orphan messages, saving...")
+            self.save()
         return repairs
 
     def _now(self) -> float:
