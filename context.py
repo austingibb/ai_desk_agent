@@ -41,11 +41,39 @@ class Context:
             for m in self.messages:
                 if "_ts" not in m:
                     m["_ts"] = now
+            repaired = self._repair_pairing()
             print(f"[CONTEXT] Loaded {len(self.messages)} messages from {CONTEXT_FILE}")
             return True
         except Exception as e:
             print(f"[CONTEXT] Load error: {e}")
             return False
+
+    def _repair_pairing(self) -> int:
+        """Remove orphan tool messages and dangling tool_calls to satisfy OpenAI pairing rules.
+        
+        Returns the number of repairs made.
+        """
+        repairs = 0
+        pending_ids = set()
+        cleaned = []
+        for m in self.messages:
+            role = m.get("role", "")
+            if role == "assistant" and m.get("tool_calls"):
+                pending_ids = {tc["id"] for tc in m["tool_calls"]}
+                cleaned.append(m)
+            elif role == "tool":
+                tid = m.get("tool_call_id", "")
+                if tid in pending_ids:
+                    pending_ids.discard(tid)
+                    cleaned.append(m)
+                else:
+                    repairs += 1
+            else:
+                cleaned.append(m)
+        if repairs:
+            self.messages = cleaned
+            print(f"[CONTEXT] Repaired {repairs} orphan messages")
+        return repairs
 
     def _now(self) -> float:
         return _time.time()
@@ -143,6 +171,25 @@ class Context:
             return False
         return content.startswith("[Previous context summary:")
 
+    def _find_safe_end(self, start: int, desired_end: int) -> int:
+        """Adjust compaction end so we never split an assistant/tool group.
+        
+        OpenAI requires every 'tool' message to immediately follow the
+        'assistant' message that contains its matching 'tool_calls' entry.
+        Walk backward from desired_end to find a safe boundary.
+        """
+        i = desired_end
+        while i < len(self.messages):
+            msg = self.messages[i]
+            if msg.get("role") == "tool":
+                i += 1
+                continue
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                i += 1
+                continue
+            break
+        return i
+
     def check_compact(self, ai_client):
         if len(self.messages) < COMPACT_AFTER_N_MESSAGES:
             return
@@ -153,6 +200,10 @@ class Context:
         start = 1 if system_msg else 0
         end = len(self.messages) - keep_count
 
+        if end <= start:
+            return
+
+        end = self._find_safe_end(start, end)
         if end <= start:
             return
 

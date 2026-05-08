@@ -203,7 +203,11 @@ class Orchestrator:
                 tool_call_count += 1
                 last_tool_name = tc["name"]
                 print(f"[TOOL] {tc['name']}({tc['arguments']})")
-                result = self._execute_tool(tc["name"], tc["arguments"])
+                try:
+                    result = self._execute_tool(tc["name"], tc["arguments"])
+                except Exception as e:
+                    result = {"status": "error", "message": f"Tool execution failed: {e}"}
+                    print(f"[TOOL ERROR] {e}")
                 print(f"[TOOL RESULT] {json.dumps(result)[:200]}")
                 log(f"[TOOL RESULT] {json.dumps(result)}")
                 with self.ctx_lock:
@@ -213,9 +217,17 @@ class Orchestrator:
                     wait_result = self._tool_wait({})
                     print(f"[WAIT ENFORCED] display updated + wait ({wait_result.get('waited', 0)}s)")
                     with self.ctx_lock:
-                        self.ctx.add_tool_result(
-                            f"_forced_wait_{int(time.time())}", "wait", wait_result
-                        )
+                        wait_id = f"wait_{int(time.time())}"
+                        if self.ctx.messages and self.ctx.messages[-1].get("role") == "tool":
+                            assistant = self.ctx.messages[-2]
+                            if assistant.get("role") == "assistant" and assistant.get("tool_calls"):
+                                assistant["tool_calls"] = assistant["tool_calls"][:tool_call_count]
+                                assistant["tool_calls"].append({
+                                    "id": wait_id,
+                                    "type": "function",
+                                    "function": {"name": "wait", "arguments": "{}"},
+                                })
+                        self.ctx.add_tool_result(wait_id, "wait", wait_result)
                     break
 
             with self.ctx_lock:
