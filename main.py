@@ -27,6 +27,8 @@ from config import (
     MAX_PROPOSAL_INTERVAL,
     CATEGORY_COOLDOWN_REVIEWS,
     POLICY_REMINDER,
+    estimate_tool_tokens,
+    LLM_ESTIMATED_MAX_TOKENS,
 )
 from notifications import NotificationStore
 from context import Context
@@ -138,13 +140,31 @@ class Orchestrator:
 
             with self.ctx_lock:
                 messages = self.ctx.get_messages()
-                tokens = self.ctx.total_tokens()
+                msg_tokens = self.ctx.total_tokens()
             messages.append({"role": "user", "content": POLICY_REMINDER})
-            print(f"[LLM] Sending {len(messages)} messages (~{tokens} tokens)...")
+            estimated = msg_tokens + estimate_tool_tokens(tools) + len(POLICY_REMINDER) // 3
+            if estimated > LLM_ESTIMATED_MAX_TOKENS:
+                print(f"[LLM] Token estimate {estimated} exceeds limit {LLM_ESTIMATED_MAX_TOKENS}, compacting...")
+                with self.ctx_lock:
+                    self.ctx.check_compact(self.ai)
+                with self.ctx_lock:
+                    messages = self.ctx.get_messages()
+                    msg_tokens = self.ctx.total_tokens()
+                messages.append({"role": "user", "content": POLICY_REMINDER})
+                estimated = msg_tokens + estimate_tool_tokens(tools) + len(POLICY_REMINDER) // 3
+                print(f"[LLM] After compaction: ~{msg_tokens} msg tokens + {estimate_tool_tokens(tools)} tool tokens = ~{estimated} total")
+            print(f"[LLM] Sending {len(messages)} messages (~{msg_tokens} msg tokens, ~{estimate_tool_tokens(tools)} tool tokens, ~{estimated} total)...")
             play_sound("thinking")
             try:
                 response = self.ai.chat_with_tools(messages, tools)
             except Exception as e:
+                err_str = str(e)
+                if "exceed_context_size_error" in err_str or "exceeds the available context size" in err_str:
+                    print(f"[LLM] Context overflow detected, triggering compaction...")
+                    with self.ctx_lock:
+                        self.ctx.check_compact(self.ai)
+                    time.sleep(1)
+                    continue
                 print(f"[LLM] Error: {e}")
                 with self.ctx_lock:
                     self.ctx.add_user("Something went wrong. Continue the rhythm — what's your next action?")

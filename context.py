@@ -3,7 +3,7 @@
 import json
 import os
 import time as _time
-from config import COMPACT_AFTER_N_MESSAGES, KEEP_LAST_N_MESSAGES, PROJECT_DIR
+from config import COMPACT_AFTER_N_MESSAGES, KEEP_LAST_N_MESSAGES, PROJECT_DIR, TOKEN_ESTIMATE_DIVISOR
 
 CONTEXT_FILE = os.path.join(PROJECT_DIR, "context.json")
 
@@ -128,11 +128,11 @@ class Context:
                     if isinstance(part, dict) and part.get("type") == "image_url":
                         total += 3500
                     elif isinstance(part, dict) and part.get("type") == "text":
-                        total += len(part.get("text", "")) // 4
+                        total += max(1, len(part.get("text", "")) // TOKEN_ESTIMATE_DIVISOR)
             elif isinstance(content, str):
-                total += len(content) // 4
+                total += max(1, len(content) // TOKEN_ESTIMATE_DIVISOR)
             for tc in msg.get("tool_calls", []):
-                total += len(json.dumps(tc)) // 4
+                total += max(1, len(json.dumps(tc)) // TOKEN_ESTIMATE_DIVISOR)
         return total
 
     @staticmethod

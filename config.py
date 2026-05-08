@@ -16,7 +16,23 @@ LLM_TIMEOUT = 120
 
 # Context
 COMPACT_AFTER_N_MESSAGES = int(os.environ.get("COMPACT_AFTER_N_MESSAGES", "150"))
-MAX_CONTEXT_TOKENS = 64000
+MAX_CONTEXT_TOKENS = 55000
+LLM_ESTIMATED_MAX_TOKENS = MAX_CONTEXT_TOKENS - 4096  # leave headroom for response + overhead
+TOKEN_ESTIMATE_DIVISOR = 3  # conservative: ~3 chars per token for Gemma
+
+def estimate_tokens(text: str) -> int:
+    """Conservative token estimate for Gemma. Approx 3 chars/token for English."""
+    if isinstance(text, str):
+        return max(1, len(text) // TOKEN_ESTIMATE_DIVISOR)
+    if isinstance(text, list):
+        return sum(estimate_tokens(str(item)) for item in text)
+    return 0
+
+def estimate_tool_tokens(tools: list) -> int:
+    """Estimate tokens consumed by tool definitions sent to the LLM."""
+    import json
+    return estimate_tokens(json.dumps(tools))
+
 KEEP_LAST_N_MESSAGES = 30
 
 # Retained for backward compat with buttons.py
