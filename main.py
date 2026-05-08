@@ -10,8 +10,8 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 from config import (
     DISPLAY_SERVER_URL,
-    SYSTEM_PROMPT,
-    TOOL_DEFINITIONS,
+    build_system_prompt,
+    get_tool_definitions,
     MAX_TOOL_CALLS_PER_TURN,
     MIN_PHOTO_INTERVAL,
     MIN_DISPLAY_INTERVAL,
@@ -29,6 +29,7 @@ from config import (
     POLICY_REMINDER,
     estimate_tool_tokens,
     LLM_ESTIMATED_MAX_TOKENS,
+    ENABLE_CAMERA,
 )
 from notifications import NotificationStore
 from context import Context
@@ -112,10 +113,16 @@ class Orchestrator:
         with self.ctx_lock:
             if self.ctx.load():
                 print("Resuming from saved context.")
-                self.ctx.add_user("You just woke back up after a restart! Use take_photo to see the room and pick up where you left off.")
+                if ENABLE_CAMERA:
+                    self.ctx.add_user("You just woke back up after a restart! Use take_photo to see the room and pick up where you left off.")
+                else:
+                    self.ctx.add_user("You just woke back up after a restart! Camera is not available — use your other tools to pick up where you left off.")
             else:
-                self.ctx.add_system(SYSTEM_PROMPT)
-                self.ctx.add_user("You just woke up! Use take_photo to see the room and say hi.")
+                self.ctx.add_system(build_system_prompt())
+                if ENABLE_CAMERA:
+                    self.ctx.add_user("You just woke up! Use take_photo to see the room and say hi.")
+                else:
+                    self.ctx.add_user("You just woke up! Note: camera/vision tools are not available. Use your other tools to say hi.")
         print("Entering agent loop.")
 
         while self.running:
@@ -133,9 +140,9 @@ class Orchestrator:
         nudged = False
 
         while self.running:
-            tools = TOOL_DEFINITIONS
+            tools = get_tool_definitions()
             if self.mcp_tools:
-                tools = TOOL_DEFINITIONS.copy()
+                tools = get_tool_definitions()
                 tools.extend(self.mcp_tools)
 
             with self.ctx_lock:
@@ -216,6 +223,8 @@ class Orchestrator:
 
     def _execute_tool(self, name: str, args: dict) -> dict:
         if name == "take_photo":
+            if not ENABLE_CAMERA:
+                return {"error": "Camera is disabled. Use other tools instead."}
             play_sound("take_photo")
             return self._tool_take_photo()
         elif name == "update_display":
@@ -465,9 +474,14 @@ class Orchestrator:
                 return
             time.sleep(1)
         with self.ctx_lock:
-            self.ctx.add_user(
-                "Some time has passed. Use take_photo to see the room, or wait to stay quiet."
-            )
+            if ENABLE_CAMERA:
+                self.ctx.add_user(
+                    "Some time has passed. Use take_photo to see the room, or wait to stay quiet."
+                )
+            else:
+                self.ctx.add_user(
+                    "Some time has passed. Find something to talk about, or wait to stay quiet."
+                )
 
     def _start_chat_server(self):
         ChatHandler.orchestrator = self
