@@ -1,16 +1,17 @@
 # AI E-Ink Friend
 
-Two Raspberry Pis running an autonomous AI agent that observes the room through a camera, chats with the user, and displays messages on an e-ink screen. The AI uses tool calling (take_photo, update_display, wait, Brave Search MCP) to control its own rhythm.
+Two Raspberry Pis running an autonomous AI agent that observes the room through a camera, chats with the user, and displays messages on an e-ink screen. Uses a two-model architecture: DeepSeek on OpenRouter for reasoning/tool calling, and local Gemma 4 31B on llama.cpp for vision and compaction.
 
 ## Architecture
 
 ```
 Pi 5 (192.168.0.39) — Orchestrator (main.py)
-├── camera.py        → Picamera2 capture → base64 JPEG data URI
-├── ai_client.py     → OpenAI-compatible HTTP client (llama.cpp + Gemma 4 31B)
-├── context.py       → Message history, timestamps, token counting, compaction
+├── camera.py        → Picamera2 capture (2304×1296 full FOV → 640px downscale)
+├── ai_client.py     → AIClient (DeepSeek/OpenRouter) + VisionClient (local Gemma/llama.cpp)
+├── context.py       → Message history, timestamps, token counting, compaction, pairing repair
 ├── mcp_client.py    → Brave Search MCP integration (JSON-RPC over SSE/HTTP)
 ├── sounds.py        → Non-blocking PulseAudio playback for tool events
+├── notifications.py → Notification proposals, approval/rejection, decay scoring
 └── chat server :8080  → Web UI for user to type messages
 
 Pi Zero 2W (192.168.0.38) — Display Server (display_server.py :5050)
@@ -18,75 +19,129 @@ Pi Zero 2W (192.168.0.38) — Display Server (display_server.py :5050)
 └── buttons.py       → GPIO button polling (YES=5, NO=6, active LOW)
 
 LLM Server (192.168.0.4:8081)
-└── llama.cpp running Gemma 4 31B Q4 with OpenAI-compatible API
+└── llama.cpp running Gemma 4 31B Q4 — vision descriptions + compaction fallback
 ```
 
-## Agent Loop (main.py Orchestrator._turn, line 118)
+## Two-Model Architecture
 
-1. Build tools list (core + MCP tools)
-2. Send messages + tool definitions to LLM
-3. Store assistant response (only if it has tool_calls)
-4. Execute each tool call, store results in context
-5. After a successful `update_display`, enforce a physical wait (backoff 10→30→90→270→810s)
-6. Check compaction (every turn, after tool execution)
-7. If no tool calls → idle timeout → nudge message → restart
+- **DeepSeek (OpenRouter)** — the brain. Reasoning, tool calling, display decisions, notification management. Text-only.
+- **Local Gemma 4 (llama.cpp)** — vision-only. Background thread captures photos every 3 min, sends to Gemma for description, caches result.
+
+DeepSeek accesses the scene via a `take_photo` tool that returns the latest cached text description (instant, no round-trip to local LLM at call time). Compaction uses DeepSeek if API key is set, otherwise falls back to local Gemma.
+
+## Agent Loop (main.py Orchestrator._turn)
+
+1. Drain chat queue into context (thread-safe)
+2. Run `_repair_pairing()` to fix OpenRouter message format violations
+3. Build tools list (core + MCP tools)
+4. Estimate tokens, trigger compaction if needed
+5. Send messages + tool definitions to DeepSeek
+6. Store assistant response in context
+7. Execute each tool call, store results
+8. After `update_display`, enforce a wait (unless DeepSeek already called `wait`)
+9. Check compaction after all tool results
+10. If no tool calls → idle timeout → nudge → restart
+
+## Background Vision Loop
+
+A daemon thread (`_start_vision_loop`) runs independently:
+1. Every `VISION_POLL_INTERVAL` (180s): capture photo via Picamera2
+2. Send base64 JPEG to local Gemma via `VisionClient.describe()`
+3. Cache result in `self.latest_scene` (protected by `scene_lock`)
+4. Save debug JPEG to `debug_images/` (24h rolling window)
+5. Retry up to 3 times on empty response (Gemma intermittently returns empty)
+
+When DeepSeek calls `take_photo`, it gets the cached description instantly.
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
-| `main.py` | Orchestrator loop, tool execution, chat server, signal handling |
-| `config.py` | All constants, system prompt, tool definitions |
-| `context.py` | Message store with timestamps, compaction logic |
-| `ai_client.py` | LLM HTTP client, Gemma-specific text parsing, compaction summarizer |
-| `camera.py` | Picamera2 JPEG capture → base64 data URI |
-| `mcp_client.py` | Brave Search MCP client (discovery + tool calls) |
+| `main.py` | Orchestrator loop, tool execution, vision thread, chat server, signal handling |
+| `config.py` | All constants, system prompt, tool definitions, `ENABLE_CAMERA` flag |
+| `context.py` | Message store with timestamps, compaction, `_repair_pairing()` for OpenRouter |
+| `ai_client.py` | `AIClient` (DeepSeek/OpenRouter) + `VisionClient` (local Gemma/llama.cpp) |
+| `camera.py` | Picamera2 capture at 2304×1296, downscale to 640px, JPEG encode |
+| `mcp_client.py` | Brave Search MCP client (JSON-RPC over SSE/HTTP) |
+| `notifications.py` | Notification proposals, approval/rejection, decay scoring, review summaries |
+| `sounds.py/sounds/` | PulseAudio sound effects for tool events |
 | `display_server.py` | HTTP API for display updates, button state, health checks |
 | `display.py` | E-ink hardware driver (PIL text rendering) |
 | `buttons.py` | GPIO button reading via gpiod v2 |
-| `sounds.py/sounds/` | PulseAudio sound effects for tool events |
+| `requests_for_image_model.md` | Dynamic instructions for what the vision model looks for |
+
+## Tools
+
+**Core tools** (defined in `config.py` TOOL_DEFINITIONS):
+- `take_photo` — returns cached text description from background vision thread
+- `update_display` — show message on e-ink (~140 chars max)
+- `wait` — pause with button/chat interruption polling
+- `propose_notification` — propose a recurring notification for user approval
+- `update_vision_requests` — modify what the vision model looks for
+
+**MCP tools** (Brave Search, via `mcp_client.py`):
+- `brave_web_search`, `brave_local_search`, `brave_image_search`, `brave_video_search`, `brave_news_search`, `brave_summarizer`
+
+When `ENABLE_CAMERA=0`, `take_photo` and `update_vision_requests` are excluded from tools and system prompt.
 
 ## Configuration
 
 All in `config.py`. Key constants:
 
-- `COMPACT_AFTER_N_MESSAGES` (default: 150, env override) — trigger compaction by message count
+### Brain LLM (DeepSeek/OpenRouter)
+- `LLM_BASE_URL` (default: `https://openrouter.ai/api/v1`)
+- `LLM_API_KEY` (env var, required for OpenRouter)
+- `LLM_MODEL` (default: `deepseek/deepseek-chat`)
+- `LLM_MAX_TOKENS` (2048), `LLM_MAX_TOKENS_COMPACT` (1024), `LLM_TIMEOUT` (120s)
+
+### Vision LLM (local Gemma/llama.cpp)
+- `VISION_BASE_URL` (default: `http://192.168.0.4:8081/v1`)
+- `VISION_MODEL` (default: `gemma-4-31B-it-UD-Q4_K_XL.gguf`)
+- `VISION_POLL_INTERVAL` (180s), `VISION_TIMEOUT` (60s)
+
+### Context & Compaction
+- `COMPACT_AFTER_N_MESSAGES` (150, env override) — trigger compaction by message count
 - `KEEP_LAST_N_MESSAGES` (30) — messages kept after compaction
-- `MAX_TOOL_CALLS_PER_TURN` (10) — safety limit per agent turn
-- `MIN_PHOTO_INTERVAL` (5s), `MIN_DISPLAY_INTERVAL` (10s) — rate limits
+- `MAX_CONTEXT_TOKENS` (64000), `TOKEN_ESTIMATE_DIVISOR` (4 chars/token)
+
+### Agent Behavior
 - `BACKOFF_BASE` (10s), `BACKOFF_MAX` (900s) — wait backoff (triples each cycle, resets on interaction)
-- `IDLE_TIMEOUT` (60s) — seconds before nudging idle AI
-- `LLM_MAX_TOKENS` (2048), `LLM_TIMEOUT` (120s) — LLM parameters
+- `MAX_TOOL_CALLS_PER_TURN` (10), `MIN_DISPLAY_INTERVAL` (10s), `IDLE_TIMEOUT` (60s)
+
+### Notifications
+- `REVIEW_INTERVAL` (1800s / 30 min), `MAX_PROPOSAL_INTERVAL` (7200s / 2h between proposals)
+- `MAX_FIRINGS_PER_HOUR` (1), `CATEGORY_COOLDOWN_REVIEWS` (3)
+
+### Hardware
+- `ENABLE_CAMERA` (env, default 1) — toggle camera/vision features
+- `CAMERA_WIDTH` (2304), `CAMERA_HEIGHT` (1296) — full sensor FOV
+- `DISPLAY_WIDTH` (250), `DISPLAY_HEIGHT` (122) — SSD1680Z e-ink
 
 ## Context & Compaction
 
-Messages are stored in OpenAI format with a private `_ts` (timestamp) field. `get_messages()` injects human-readable timestamps like `[Wed 14:30:22]` into content before sending to the LLM.
+Messages stored in OpenAI format with `_ts` (timestamp) field. `get_messages()` injects human-readable timestamps like `[Wed 14:30:22]` into content before sending to the LLM.
 
-Compaction triggers at `COMPACT_AFTER_N_MESSAGES` (150). It summarizes everything except the system prompt and last `KEEP_LAST_N_MESSAGES` (30) into a single `[Previous context summary: ...]` message. Images are excluded from persistence (`context.json`).
+Compaction triggers at `COMPACT_AFTER_N_MESSAGES` (150). Summarizes everything except system prompt and last 30 messages into a `[Previous context summary: ...]` message. Uses `_find_safe_end()` to avoid splitting assistant/tool pairs. Compaction done by DeepSeek (with local Gemma fallback).
 
-## LLM Quirks (Gemma 4 on llama.cpp)
+## OpenRouter Message Pairing
 
-- Strips control token junk like `<|"|>` from output
-- Parses inline tool calls Gemma sometimes emits as text: `<|tool_call>call:wait{seconds:600}<tool_call|>`
-- Parses non-JSON argument format `{key:value, ...}`
-- Cleans string arguments from control tokens
+OpenRouter requires strict format: assistant messages with `tool_calls` must be immediately followed by matching `tool` result messages. `_repair_pairing()` in context.py fixes three violation types:
+1. Orphan tool messages (no matching assistant)
+2. Sandwiched non-tool messages between assistant and its tool results
+3. Unfulfilled tool_calls (trims from assistant's tool_calls list)
 
-## The System Prompt
+Chat messages are queued (`chat_queue`) and drained at safe points to avoid breaking pairing.
 
-Defines a friendly, chatty persona with three core tools (take_photo, update_display, wait) plus Brave Search MCP tools. Gives the AI a rhythm: think → share thought → wait → update display → wait → repeat. Warns about emoji limitations on e-ink (use text emoticons).
+## Chat Server
 
-## Hardware Notes
-
-- Camera: Waveshare CM5 carrier needs `dtoverlay=imx708,cam0` in `/boot/firmware/config.txt`
-- Pi 5 venv needs `--system-site-packages` (python3-libcamera is system-only)
-- gpiod v2 on Pi Zero 2W: `get_value()` returns bool (False = pressed)
-- SSH user: `austingibb` on both Pis
+Web UI on `:8080`. GET `/chat` returns last 50 filtered messages as JSON (with timestamps as metadata). POST `/chat` queues message and signals the agent loop. Detects notification rejection keywords ("no", "stop", "cancel") in chat input.
 
 ## Add New Tool
 
 1. Add tool definition to `TOOL_DEFINITIONS` in `config.py`
 2. Add handler in `main.py._execute_tool()`
-3. If external tool: add to `mcp_client.py` (Brave Search MCP integration)
+3. If camera-related: add name to `CAMERA_TOOL_NAMES` in `config.py`
+4. If external tool: add to `mcp_client.py`
 
 ## Common Tasks
 
@@ -99,3 +154,10 @@ ssh austingibb@192.168.0.38 'cd ~/ai_eink && git pull && sudo systemctl restart 
 **Watch logs**: `ssh austingibb@192.168.0.39 'sudo journalctl -u ai-eink -f'`
 
 **Test locally**: `python3 -c "import py_compile; py_compile.compile('main.py', doraise=True)"` (no Pi dependencies needed for syntax check)
+
+## Hardware Notes
+
+- Camera: IMX708 on Waveshare CM5 carrier, needs `dtoverlay=imx708,cam0` in `/boot/firmware/config.txt`. Capture at full 2304×1296 for widest FOV, downscale to 640px for LLM.
+- Pi 5 venv needs `--system-site-packages` (python3-libcamera is system-only)
+- gpiod v2 on Pi Zero 2W: `get_value()` returns bool (False = pressed)
+- SSH user: `austingibb` on both Pis

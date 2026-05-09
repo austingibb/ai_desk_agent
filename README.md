@@ -1,6 +1,6 @@
 # AI E-Ink Friend
 
-An autonomous AI friend running on two Raspberry Pis — it watches the room, shares thoughts on an e-ink display, and chats with you.
+An autonomous AI friend running on two Raspberry Pis — it watches the room, shares thoughts on an e-ink display, and chats with you. Uses DeepSeek on OpenRouter as the brain and local Gemma 4 for vision.
 
 ## Hardware
 
@@ -8,14 +8,21 @@ An autonomous AI friend running on two Raspberry Pis — it watches the room, sh
 |--------|------|
 | **Pi 5 (CM5, .39)** | Orchestrator — runs the AI agent loop, camera, web chat server |
 | **Pi Zero 2W (.38)** | Display server — drives SSD1680Z e-ink (122×250) + two GPIO buttons |
-| **Separate machine (.4:8081)** | LLM via llama.cpp (OpenAI-compatible API) — defaults to Gemma 4 31B |
+| **Separate machine (.4:8081)** | Vision LLM via llama.cpp — Gemma 4 31B for photo descriptions |
 
 ## How it works
 
-The AI runs in an autonomous agent loop using OpenAI-style **tool calling**:
+The AI runs in an autonomous agent loop with a **two-model architecture**:
 
-1. The orchestrator sends conversation history + tool definitions to the LLM
-2. The LLM decides what to do: take a photo, update the display, or wait
+- **DeepSeek on OpenRouter** — the brain. Handles reasoning, tool calling, conversation, and notification management. Text-only, no images.
+- **Local Gemma 4 31B** — vision-only. A background thread captures photos every ~3 minutes, sends them to Gemma for a text description, and caches the result.
+
+When the brain calls `take_photo`, it gets the cached description instantly — no round-trip to the vision model during the agent loop.
+
+### Agent loop
+
+1. The orchestrator sends conversation history + tool definitions to DeepSeek
+2. DeepSeek decides what to do: check the room, update the display, wait, search the web, or just idle
 3. Tools are executed and results fed back into the conversation
 4. Repeat — no timers, no hardcoded logic, the AI is in full control
 
@@ -23,45 +30,74 @@ The AI runs in an autonomous agent loop using OpenAI-style **tool calling**:
 
 | Tool | What it does |
 |------|-------------|
-| `take_photo` | Captures a 640×480 photo via Picamera2, adds it to the conversation |
+| `take_photo` | Returns a cached text description of the room (photos taken automatically every ~3 min) |
 | `update_display` | Renders text (~140 chars max) on the e-ink display with a timestamp |
 | `wait` | Pauses — polls for button presses or chat messages every second |
+| `propose_notification` | Proposes a recurring notification for user approval via button press |
+| `update_vision_requests` | Changes what the vision model looks for when describing the scene |
+| Brave Search tools | Web, local, image, video, news search + summarizer via MCP |
 
 ### Interaction
 
-- **Web chat** (`http://192.168.0.39:8080`) — Type messages to the AI, see its display responses
-- **Physical buttons** (GPIO 5/6) — Press either button to nudge the AI to say something new
-- **Brave Search** — Optional MCP integration for web search, news, images
+- **Web chat** (`http://192.168.0.39:8080`) — Type messages to the AI, see its display responses with timestamps
+- **Physical buttons** (GPIO 5/6) — Press either button to nudge the AI to say something new, or approve a proposed notification
+- **Brave Search** — MCP integration for web search, news, images, and more
 
 ### Wait backoff
 
 Waits use exponential backoff to avoid spamming the display:
 
-- Starts at 10s → doubles on each peaceful completion (20s, 40s, 80s, 160s, capped at 180s)
+- Starts at 10s → triples on each peaceful completion (30s, 90s, 270s, 810s, capped at 900s)
 - Any user interaction (chat or button) resets it back to 10s
 
 ### Context management
 
 - Conversation persisted to `context.json` across restarts
-- Rough token counting (chars ÷ 4, images ≈ 3500 tokens)
-- Auto-compaction at 70% of the 64k token limit — compresses old messages into a summary
-- Only the latest photo is kept in context
+- System prompt refreshed from code on every restart
+- Token counting at ~4 chars/token
+- Auto-compaction at 150 messages — summarizes old messages (via DeepSeek or local Gemma) into a summary, keeps last 30
+- OpenRouter message pairing enforced via `_repair_pairing()` — fixes orphan tool results, sandwiched messages, and unmatched tool calls
+
+### Notifications
+
+The AI can propose recurring notifications (stretch reminders, "it's getting late", etc.):
+- Proposed via `propose_notification` tool during periodic reviews
+- User approves via button press, rejects via chat ("no", "stop", etc.)
+- Category scoring tracks what the user likes/dislikes
+- Decay system expires unacknowledged notifications over time
 
 ### Sound effects
 
 Non-blocking PulseAudio sounds play on key events: thinking, taking a photo, updating the display, searching, waiting.
 
-## LLM configuration
+## Configuration
 
 Set via environment variables or `.env` file:
 
+### Brain LLM (DeepSeek/OpenRouter)
+
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `LLM_BASE_URL` | `http://192.168.0.4:8081/v1` | Any OpenAI-compatible API |
-| `LLM_MODEL` | `gemma-4-31B-it-UD-Q4_K_XL.gguf` | Model name |
-| `LLM_API_KEY` | _(empty)_ | Required for OpenRouter, optional for local |
+| `LLM_BASE_URL` | `https://openrouter.ai/api/v1` | Any OpenAI-compatible API |
+| `LLM_MODEL` | `deepseek/deepseek-chat` | Model name |
+| `LLM_API_KEY` | _(empty)_ | Required for OpenRouter |
 
-Gemma-specific quirks (control token stripping, inline `<|tool_call|>` parsing) are applied automatically when the model name contains "gemma". Non-Gemma models get standard OpenAI tool call passthrough.
+### Vision LLM (local Gemma/llama.cpp)
+
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `VISION_BASE_URL` | `http://192.168.0.4:8081/v1` | Local llama.cpp server |
+| `VISION_MODEL` | `gemma-4-31B-it-UD-Q4_K_XL.gguf` | Vision model name |
+| `VISION_API_KEY` | _(empty)_ | Optional |
+| `VISION_POLL_INTERVAL` | `180` | Seconds between photo captures |
+
+### Other
+
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `ENABLE_CAMERA` | `1` | Set to `0` to disable camera/vision tools |
+| `COMPACT_AFTER_N_MESSAGES` | `150` | Trigger compaction threshold |
+| `REVIEW_INTERVAL` | `1800` | Seconds between notification reviews |
 
 ## Deployment
 
@@ -81,6 +117,13 @@ pip install -r requirements-display.txt
 sudo systemctl enable --now display-server
 ```
 
+### Quick deploy (from dev machine)
+
+```bash
+ssh austingibb@192.168.0.39 'cd ~/ai_eink && git pull && sudo systemctl restart ai-eink'
+ssh austingibb@192.168.0.38 'cd ~/ai_eink && git pull && sudo systemctl restart display-server'
+```
+
 ### Watching logs
 
 ```bash
@@ -91,13 +134,15 @@ ssh austingibb@192.168.0.39 'sudo journalctl -u ai-eink -f'
 
 | File | Runs on | Purpose |
 |------|---------|---------|
-| `main.py` | Pi 5 | Agent loop, tool execution, web chat server |
+| `main.py` | Pi 5 | Agent loop, tool execution, vision thread, web chat server |
 | `config.py` | Both | All constants, system prompt, tool definitions |
-| `context.py` | Pi 5 | Conversation history, token counting, compaction |
-| `ai_client.py` | Pi 5 | LLM HTTP client with tool-call parsing |
-| `camera.py` | Pi 5 | Picamera2 capture → base64 JPEG |
+| `context.py` | Pi 5 | Conversation history, token counting, compaction, pairing repair |
+| `ai_client.py` | Pi 5 | `AIClient` (DeepSeek) + `VisionClient` (local Gemma) |
+| `camera.py` | Pi 5 | Picamera2 capture at 2304×1296 → 640px downscale → base64 JPEG |
 | `mcp_client.py` | Pi 5 | Brave Search MCP integration (JSON-RPC/SSE) |
+| `notifications.py` | Pi 5 | Notification proposals, scoring, decay, review summaries |
 | `sounds.py` | Pi 5 | Non-blocking PulseAudio sound playback |
 | `display_server.py` | Pi Zero 2W | HTTP API on :5050 for display + button monitoring |
 | `display.py` | Pi Zero 2W | SSD1680Z e-ink driver, PIL text rendering |
-| `buttons.py` | Pi Zero 2W | Direct GPIO button reading (gpiod) |
+| `buttons.py` | Pi Zero 2W | GPIO button reading (gpiod v2) |
+| `requests_for_image_model.md` | Pi 5 | Dynamic instructions for vision model (editable by AI) |
