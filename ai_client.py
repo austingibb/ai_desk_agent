@@ -125,7 +125,10 @@ class VisionClient:
         )
         resp.raise_for_status()
         raw = resp.json()["choices"][0]["message"]["content"]
-        return _clean(raw)
+        cleaned = _clean(raw)
+        if not cleaned:
+            print(f"[VISION] Raw response was cleaned to empty. Raw: {repr(raw[:200])}")
+        return cleaned
 
     def compact(self, text: str) -> str:
         """Summarize old context using local Gemma (free)."""

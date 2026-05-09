@@ -315,6 +315,9 @@ class Orchestrator:
         except Exception as e:
             print(f"[VISION] Describe error: {e}")
             return None
+        if not description:
+            print("[VISION] Got empty description from vision model, skipping")
+            return None
         scene = {"description": description, "timestamp": time.time()}
         with self.scene_lock:
             self.latest_scene = scene
