@@ -214,6 +214,18 @@ class Orchestrator:
                 log(f"[AI] {response['content']}")
 
             if not response["tool_calls"]:
+                # If DeepSeek returned text but no tool call, display it automatically
+                if response["content"]:
+                    content = response["content"]
+                    if len(content) > 140:
+                        print(f"[AUTO-CHAT] AI returned long content without tool call, sending to chat...")
+                        result = self._tool_send_chat_message({"text": content})
+                    else:
+                        print(f"[AUTO-DISPLAY] AI returned content without update_display, showing it...")
+                        result = self._tool_update_display({"text": content})
+                    if result.get("status") == "ok":
+                        self._tool_wait({})
+                    continue
                 if tool_call_count > 0 and not nudged:
                     print("[PROMPT] No tool call after tool execution, nudging LLM to continue rhythm...")
                     with self.ctx_lock:
@@ -248,7 +260,7 @@ class Orchestrator:
                 if user_msg:
                     deferred_user_msgs.append(user_msg)
 
-                if tc["name"] == "update_display" and result.get("status") == "ok":
+                if tc["name"] in ("update_display", "send_chat_message") and result.get("status") == "ok":
                     enforced_wait = True
 
             # Enforced wait after display update — skip if DeepSeek already called wait
@@ -289,6 +301,9 @@ class Orchestrator:
         elif name == "update_display":
             play_sound("update_display")
             return self._tool_update_display(args)
+        elif name == "send_chat_message":
+            play_sound("update_display")
+            return self._tool_send_chat_message(args)
         elif name == "wait":
             play_sound("wait")
             return self._tool_wait(args)
@@ -420,6 +435,22 @@ class Orchestrator:
             return {"status": "ok", "message": "Display updated."}
         else:
             return {"status": "error", "message": "Failed to communicate with display server"}
+
+    def _tool_send_chat_message(self, args: dict) -> dict:
+        text = args.get("text", "")
+        if not text.strip():
+            return {"status": "error", "message": "No text provided"}
+
+        # Show a preview on the e-ink display
+        preview_max = 90
+        if len(text) <= preview_max:
+            preview = text
+        else:
+            preview = text[:preview_max].rsplit(" ", 1)[0] + "..."
+        display_text = f"{preview}\n(full message on chat)"
+        self._tool_update_display({"text": display_text})
+
+        return {"status": "ok", "message": "Chat message sent and display preview shown."}
 
     def _tool_wait(self, args: dict) -> dict:
         seconds = max(5, min(MAX_WAIT_SECONDS, self.backoff))
@@ -753,14 +784,15 @@ class ChatHandler(BaseHTTPRequestHandler):
                     continue
                 filtered.append({"role": role, "content": content, "time": ts_str})
             elif role == "assistant":
-                # Show only what was sent to the display
+                # Show display updates and chat messages
                 for tc in m.get("tool_calls", []):
-                    if tc.get("function", {}).get("name") == "update_display":
+                    fn_name = tc.get("function", {}).get("name")
+                    if fn_name in ("update_display", "send_chat_message"):
                         try:
                             args = json.loads(tc["function"]["arguments"])
-                            display_text = args.get("text", "")
-                            if display_text.strip():
-                                filtered.append({"role": "assistant", "content": display_text, "time": ts_str})
+                            msg_text = args.get("text", "")
+                            if msg_text.strip():
+                                filtered.append({"role": "assistant", "content": msg_text, "time": ts_str})
                         except (json.JSONDecodeError, KeyError):
                             pass
 
