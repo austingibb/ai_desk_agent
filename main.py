@@ -145,9 +145,8 @@ class Orchestrator:
         nudged = False
 
         while self.running:
-            tools = get_tool_definitions()
+            tools = list(get_tool_definitions())
             if self.mcp_tools:
-                tools = get_tool_definitions()
                 tools.extend(self.mcp_tools)
 
             with self.ctx_lock:
@@ -285,14 +284,15 @@ class Orchestrator:
             return {"error": f"Unknown tool: {name}. Available: take_photo, update_display, wait"}
 
     def _tool_take_photo(self) -> dict:
-        with self.scene_lock:
-            scene = self.latest_scene
-
-        if scene is None:
-            # No cached scene yet — do a synchronous capture + describe
-            scene = self._capture_and_describe()
-            if scene is None:
-                return {"status": "error", "message": "Camera/vision unavailable"}
+        # Wait up to 90s for the background vision thread to produce a scene
+        for _ in range(90):
+            with self.scene_lock:
+                scene = self.latest_scene
+            if scene and scene.get("description"):
+                break
+            time.sleep(1)
+        else:
+            return {"status": "error", "message": "No scene available yet — vision thread may still be starting"}
 
         captured_at = time.strftime("%-I:%M%p", time.localtime(scene["timestamp"])).lower().lstrip("0")
         age = int(time.time() - scene["timestamp"])
