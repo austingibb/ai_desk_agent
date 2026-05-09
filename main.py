@@ -332,10 +332,13 @@ class Orchestrator:
     def _capture_and_describe(self) -> dict | None:
         """Capture a photo and get a text description from the local vision model."""
         try:
-            _, photo_uri = self.camera.capture()
+            jpeg_bytes, photo_uri = self.camera.capture()
         except Exception as e:
             print(f"[VISION] Camera error: {e}")
             return None
+
+        self._save_debug_image(jpeg_bytes)
+
         try:
             description = self.vision.describe(photo_uri)
         except Exception as e:
@@ -348,6 +351,27 @@ class Orchestrator:
         with self.scene_lock:
             self.latest_scene = scene
         return scene
+
+    def _save_debug_image(self, jpeg_bytes: bytes):
+        """Save captured image to debug_images/, prune files older than 24h."""
+        import os as _os
+        import glob as _glob
+        debug_dir = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "debug_images")
+        _os.makedirs(debug_dir, exist_ok=True)
+        filename = time.strftime("%Y%m%d_%H%M%S") + ".jpg"
+        try:
+            with open(_os.path.join(debug_dir, filename), "wb") as f:
+                f.write(jpeg_bytes)
+        except Exception as e:
+            print(f"[VISION] Failed to save debug image: {e}")
+            return
+        cutoff = time.time() - 86400
+        for old in _glob.glob(_os.path.join(debug_dir, "*.jpg")):
+            try:
+                if _os.path.getmtime(old) < cutoff:
+                    _os.remove(old)
+            except Exception:
+                pass
 
     def _start_vision_loop(self):
         def loop():
