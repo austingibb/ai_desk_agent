@@ -13,13 +13,10 @@ from config import (
     build_system_prompt,
     get_tool_definitions,
     MAX_TOOL_CALLS_PER_TURN,
-    MIN_PHOTO_INTERVAL,
     MIN_DISPLAY_INTERVAL,
     MAX_WAIT_SECONDS,
     IDLE_TIMEOUT,
     BUTTON_CHECK_INTERVAL,
-    CAMERA_WIDTH,
-    CAMERA_HEIGHT,
     CHAT_SERVER_PORT,
     BACKOFF_BASE,
     BACKOFF_MAX,
@@ -30,11 +27,12 @@ from config import (
     estimate_tool_tokens,
     LLM_ESTIMATED_MAX_TOKENS,
     ENABLE_CAMERA,
+    VISION_POLL_INTERVAL,
 )
 from notifications import NotificationStore
 from context import Context
 from camera import Camera
-from ai_client import AIClient
+from ai_client import AIClient, VisionClient
 from mcp_client import MCPClient
 from sounds import play as play_sound
 
@@ -73,8 +71,8 @@ class Orchestrator:
         self.ctx = Context()
         self.camera = Camera()
         self.ai = AIClient()
+        self.vision = VisionClient()
         self.running = True
-        self.last_photo_time = 0
         self.last_display_time = 0
         self.chat_event = threading.Event()
         self.ctx_lock = threading.Lock()
@@ -86,6 +84,10 @@ class Orchestrator:
         self.last_fired_notification_id = None
         self.last_proposal_time = 0.0
         self.proposal_category_cooldowns = {}
+
+        # Vision background thread state
+        self.latest_scene = None  # {"description": str, "timestamp": float}
+        self.scene_lock = threading.Lock()
 
         try:
             print("Init MCP client...")
@@ -108,8 +110,11 @@ class Orchestrator:
 
     def run(self):
         print("Init camera...")
-        print("Init AI client...")
+        print("Init AI client (DeepSeek on OpenRouter)...")
+        print("Init vision client (local Gemma)...")
         self._start_chat_server()
+        if ENABLE_CAMERA:
+            self._start_vision_loop()
         with self.ctx_lock:
             if self.ctx.load():
                 print("Resuming from saved context.")
@@ -146,10 +151,11 @@ class Orchestrator:
                 tools.extend(self.mcp_tools)
 
             with self.ctx_lock:
+                self.ctx._repair_pairing()
                 messages = self.ctx.get_messages()
                 msg_tokens = self.ctx.total_tokens()
             messages.append({"role": "user", "content": POLICY_REMINDER})
-            estimated = msg_tokens + estimate_tool_tokens(tools) + len(POLICY_REMINDER) // 3
+            estimated = msg_tokens + estimate_tool_tokens(tools) + len(POLICY_REMINDER) // 4
             if estimated > LLM_ESTIMATED_MAX_TOKENS:
                 print(f"[LLM] Token estimate {estimated} exceeds limit {LLM_ESTIMATED_MAX_TOKENS}, compacting...")
                 with self.ctx_lock:
@@ -158,7 +164,7 @@ class Orchestrator:
                     messages = self.ctx.get_messages()
                     msg_tokens = self.ctx.total_tokens()
                 messages.append({"role": "user", "content": POLICY_REMINDER})
-                estimated = msg_tokens + estimate_tool_tokens(tools) + len(POLICY_REMINDER) // 3
+                estimated = msg_tokens + estimate_tool_tokens(tools) + len(POLICY_REMINDER) // 4
                 print(f"[LLM] After compaction: ~{msg_tokens} msg tokens + {estimate_tool_tokens(tools)} tool tokens = ~{estimated} total")
             print(f"[LLM] Sending {len(messages)} messages (~{msg_tokens} msg tokens, ~{estimate_tool_tokens(tools)} tool tokens, ~{estimated} total)...")
             play_sound("thinking")
@@ -199,6 +205,12 @@ class Orchestrator:
                 self._idle_wait()
                 return
 
+            # Execute all tool calls, deferring user messages until after
+            # all tool results are added (OpenRouter requires tool results
+            # to immediately follow the assistant message, no interleaving)
+            deferred_user_msgs = []
+            enforced_wait = False
+
             for tc in response["tool_calls"]:
                 tool_call_count += 1
                 last_tool_name = tc["name"]
@@ -212,29 +224,38 @@ class Orchestrator:
                 log(f"[TOOL RESULT] {json.dumps(result)}")
                 with self.ctx_lock:
                     self.ctx.add_tool_result(tc["id"], tc["name"], result)
-                    user_msg = result.get("user_message")
-                    if user_msg:
-                        self.ctx.add_user(user_msg)
+                user_msg = result.get("user_message")
+                if user_msg:
+                    deferred_user_msgs.append(user_msg)
 
                 if tc["name"] == "update_display" and result.get("status") == "ok":
-                    wait_result = self._tool_wait({})
-                    print(f"[WAIT ENFORCED] display updated + wait ({wait_result.get('waited', 0)}s)")
-                    with self.ctx_lock:
-                        wait_id = f"wait_{int(time.time())}"
-                        if self.ctx.messages and self.ctx.messages[-1].get("role") == "tool":
-                            assistant = self.ctx.messages[-2]
-                            if assistant.get("role") == "assistant" and assistant.get("tool_calls"):
-                                assistant["tool_calls"] = assistant["tool_calls"][:tool_call_count]
-                                assistant["tool_calls"].append({
-                                    "id": wait_id,
-                                    "type": "function",
-                                    "function": {"name": "wait", "arguments": "{}"},
-                                })
-                        self.ctx.add_tool_result(wait_id, "wait", wait_result)
-                        wait_user_msg = wait_result.get("user_message")
-                        if wait_user_msg:
-                            self.ctx.add_user(wait_user_msg)
-                    break
+                    enforced_wait = True
+
+            # Enforced wait after display update (added after all tool results)
+            if enforced_wait:
+                wait_result = self._tool_wait({})
+                print(f"[WAIT ENFORCED] display updated + wait ({wait_result.get('waited', 0)}s)")
+                with self.ctx_lock:
+                    wait_id = f"wait_{int(time.time())}"
+                    # Append wait to the assistant's tool_calls so pairing is valid
+                    for m in reversed(self.ctx.messages):
+                        if m.get("role") == "assistant" and m.get("tool_calls"):
+                            m["tool_calls"].append({
+                                "id": wait_id,
+                                "type": "function",
+                                "function": {"name": "wait", "arguments": "{}"},
+                            })
+                            break
+                    self.ctx.add_tool_result(wait_id, "wait", wait_result)
+                wait_user_msg = wait_result.get("user_message")
+                if wait_user_msg:
+                    deferred_user_msgs.append(wait_user_msg)
+
+            # Now add deferred user messages (after all tool results)
+            if deferred_user_msgs:
+                with self.ctx_lock:
+                    for msg in deferred_user_msgs:
+                        self.ctx.add_user(msg)
 
             with self.ctx_lock:
                 self.ctx.check_compact(self.ai)
@@ -264,19 +285,58 @@ class Orchestrator:
             return {"error": f"Unknown tool: {name}. Available: take_photo, update_display, wait"}
 
     def _tool_take_photo(self) -> dict:
-        elapsed = time.monotonic() - self.last_photo_time
-        if elapsed < MIN_PHOTO_INTERVAL:
-            time.sleep(MIN_PHOTO_INTERVAL - elapsed)
+        with self.scene_lock:
+            scene = self.latest_scene
 
+        if scene is None:
+            # No cached scene yet — do a synchronous capture + describe
+            scene = self._capture_and_describe()
+            if scene is None:
+                return {"status": "error", "message": "Camera/vision unavailable"}
+
+        captured_at = time.strftime("%-I:%M%p", time.localtime(scene["timestamp"])).lower().lstrip("0")
+        age = int(time.time() - scene["timestamp"])
+        return {
+            "status": "ok",
+            "description": scene["description"],
+            "captured_at": captured_at,
+            "age_seconds": age,
+        }
+
+    def _capture_and_describe(self) -> dict | None:
+        """Capture a photo and get a text description from the local vision model."""
         try:
             _, photo_uri = self.camera.capture()
         except Exception as e:
-            return {"status": "error", "message": f"Camera error: {e}"}
+            print(f"[VISION] Camera error: {e}")
+            return None
+        try:
+            description = self.vision.describe(photo_uri)
+        except Exception as e:
+            print(f"[VISION] Describe error: {e}")
+            return None
+        scene = {"description": description, "timestamp": time.time()}
+        with self.scene_lock:
+            self.latest_scene = scene
+        return scene
 
-        self.last_photo_time = time.monotonic()
-        with self.ctx_lock:
-            self.ctx.add_image(photo_uri)
-        return {"status": "ok", "description": "Photo captured and added to conversation."}
+    def _start_vision_loop(self):
+        def loop():
+            print(f"[VISION] Background thread started (interval={VISION_POLL_INTERVAL}s)")
+            while self.running:
+                scene = self._capture_and_describe()
+                if scene:
+                    print(f"[VISION] Scene updated: {scene['description'][:100]}...")
+                else:
+                    print("[VISION] Failed to capture/describe, will retry next interval")
+                for _ in range(VISION_POLL_INTERVAL):
+                    if not self.running:
+                        return
+                    time.sleep(1)
+            print("[VISION] Background thread stopped")
+
+        t = threading.Thread(target=loop, daemon=True)
+        t.start()
 
     def _tool_update_display(self, args: dict) -> dict:
         text = args.get("text", "")

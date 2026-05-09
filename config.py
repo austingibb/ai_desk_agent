@@ -7,21 +7,34 @@ load_dotenv(os.path.join(PROJECT_DIR, ".env"))
 # Network
 DISPLAY_SERVER_URL = os.environ.get("DISPLAY_SERVER_URL", "http://192.168.0.38:5050")
 
-# LLM API (OpenAI-compatible)
-LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://192.168.0.4:8081/v1")
-LLM_MODEL = os.environ.get("LLM_MODEL", "gemma-4-31B-it-UD-Q4_K_XL.gguf")
-LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
+# Brain LLM — DeepSeek on OpenRouter
+OPENROUTER_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "deepseek/deepseek-chat")
+LLM_MAX_TOKENS = 2048
 LLM_MAX_TOKENS_COMPACT = 1024
 LLM_TIMEOUT = 120
 
+# Vision LLM — local Gemma on llama.cpp
+VISION_BASE_URL = os.environ.get("VISION_BASE_URL", "http://192.168.0.4:8081/v1")
+VISION_MODEL = os.environ.get("VISION_MODEL", "gemma-4-31B-it-UD-Q4_K_XL.gguf")
+VISION_API_KEY = os.environ.get("VISION_API_KEY", "")
+VISION_POLL_INTERVAL = int(os.environ.get("VISION_POLL_INTERVAL", "180"))  # 3 min
+VISION_PROMPT = (
+    "Describe what you see in this photo briefly. "
+    "Focus on: who/what is in the room, what they're doing, lighting, "
+    "and anything notable or changed."
+)
+VISION_TIMEOUT = 60
+
 # Context
 COMPACT_AFTER_N_MESSAGES = int(os.environ.get("COMPACT_AFTER_N_MESSAGES", "150"))
-MAX_CONTEXT_TOKENS = 55000
+MAX_CONTEXT_TOKENS = 64000
 LLM_ESTIMATED_MAX_TOKENS = MAX_CONTEXT_TOKENS - 4096  # leave headroom for response + overhead
-TOKEN_ESTIMATE_DIVISOR = 3  # conservative: ~3 chars per token for Gemma
+TOKEN_ESTIMATE_DIVISOR = 4  # ~4 chars per token for DeepSeek
 
 def estimate_tokens(text: str) -> int:
-    """Conservative token estimate for Gemma. Approx 3 chars/token for English."""
+    """Conservative token estimate. Approx 4 chars/token for English."""
     if isinstance(text, str):
         return max(1, len(text) // TOKEN_ESTIMATE_DIVISOR)
     if isinstance(text, list):
@@ -40,12 +53,10 @@ BUTTON_RESPONSE_TIMEOUT = 300
 
 # Tool calling limits
 MAX_TOOL_CALLS_PER_TURN = 10
-MIN_PHOTO_INTERVAL = 5
 MIN_DISPLAY_INTERVAL = 10
 MAX_WAIT_SECONDS = 600
 IDLE_TIMEOUT = 60
 BUTTON_CHECK_INTERVAL = 1
-LLM_MAX_TOKENS = 2048
 CHAT_SERVER_PORT = 8080
 BACKOFF_BASE = 10
 BACKOFF_MAX = 900
@@ -163,7 +174,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "take_photo",
-            "description": "Capture a photo of the room. The image will be added to the conversation.",
+            "description": "Check what the room looks like. Returns a text description of the latest camera capture (photos are taken automatically every few minutes).",
             "parameters": {
                 "type": "object",
                 "properties": {},

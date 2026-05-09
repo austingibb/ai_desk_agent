@@ -50,38 +50,66 @@ class Context:
 
     def _repair_pairing(self) -> int:
         """Remove messages that violate OpenAI assistant/tool pairing rules.
-        
-        Two violations fixed:
+
+        Three violations fixed:
         1. Tool messages without a preceding assistant tool_calls entry (orphan tools)
         2. Non-tool messages sandwiched between an assistant with tool_calls
            and its tool results (OpenRouter requires tool to immediately follow assistant)
-        
+        3. Assistant tool_calls with no matching tool result (trimmed from tool_calls list;
+           if all are unmatched, the assistant message is kept without tool_calls)
+
         Returns the number of repairs made.
         """
         repairs = 0
         pending_ids = set()
+        current_assistant = None  # track assistant with pending tool_calls
+        fulfilled_ids = set()    # tool_call IDs that got results
         cleaned = []
+
+        def _trim_assistant(assistant_msg, fulfilled):
+            """Remove unfulfilled tool_calls from an assistant message."""
+            nonlocal repairs
+            original = assistant_msg.get("tool_calls", [])
+            kept = [tc for tc in original if tc["id"] in fulfilled]
+            if len(kept) < len(original):
+                repairs += len(original) - len(kept)
+                if kept:
+                    assistant_msg["tool_calls"] = kept
+                else:
+                    del assistant_msg["tool_calls"]
+
         for m in self.messages:
             role = m.get("role", "")
             if role == "assistant" and m.get("tool_calls"):
+                # Trim previous assistant if it had unfulfilled tool_calls
+                if current_assistant and pending_ids:
+                    _trim_assistant(current_assistant, fulfilled_ids)
                 pending_ids = {tc["id"] for tc in m["tool_calls"]}
+                fulfilled_ids = set()
+                current_assistant = m
                 cleaned.append(m)
             elif role == "tool":
                 tid = m.get("tool_call_id", "")
                 if pending_ids and tid in pending_ids:
                     pending_ids.discard(tid)
+                    fulfilled_ids.add(tid)
                     cleaned.append(m)
                     if not pending_ids:
-                        pending_ids = set()
+                        current_assistant = None
                 else:
                     repairs += 1
             elif pending_ids:
                 repairs += 1
             else:
                 cleaned.append(m)
+
+        # Handle unfulfilled tool_calls on the last assistant message
+        if current_assistant and pending_ids:
+            _trim_assistant(current_assistant, fulfilled_ids)
+
         if repairs:
             self.messages = cleaned
-            print(f"[CONTEXT] Repaired {repairs} orphan messages, saving...")
+            print(f"[CONTEXT] Repaired {repairs} pairing violations, saving...")
             self.save()
         return repairs
 

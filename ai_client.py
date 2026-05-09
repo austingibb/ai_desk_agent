@@ -1,12 +1,17 @@
-"""LLM API client — tool-calling support via OpenAI-compatible endpoint."""
+"""LLM API clients — DeepSeek on OpenRouter (brain) + local Gemma (vision/compaction)."""
 
 import json
 import re
 import requests
 from config import (
-    LLM_BASE_URL,
-    LLM_MODEL,
-    LLM_API_KEY,
+    OPENROUTER_BASE_URL,
+    OPENROUTER_API_KEY,
+    OPENROUTER_MODEL,
+    VISION_BASE_URL,
+    VISION_MODEL,
+    VISION_API_KEY,
+    VISION_PROMPT,
+    VISION_TIMEOUT,
     LLM_MAX_TOKENS,
     LLM_MAX_TOKENS_COMPACT,
     LLM_TIMEOUT,
@@ -20,46 +25,19 @@ def _clean(text: str) -> str:
     return _TOKEN_JUNK_RE.sub("", text).strip()
 
 
-# Gemma4 on llama.cpp sometimes outputs tool calls as inline text
-# e.g. <|tool_call>call:wait{seconds:600}<tool_call|>
-INLINE_TOOL_RE = re.compile(
-    r"<\|tool_call>\s*call:(\w+)\s*(\{[^}]*\})\s*<tool_call\|?>",
-    re.DOTALL,
-)
-
-
-def _parse_inline_args(args_str: str) -> dict:
-    """Parse {key:value, ...} from inline tool call (non-JSON, unquoted keys)."""
-    result = {}
-    if not args_str.strip():
-        return result
-    inner = args_str.strip().strip("{}")
-    pairs = [p.strip() for p in inner.split(",") if p.strip()]
-    for pair in pairs:
-        if ":" not in pair:
-            continue
-        key, val = pair.split(":", 1)
-        key = key.strip()
-        val = val.strip()
-        if val.isdigit():
-            val = int(val)
-        elif val.lower() in ("true", "false"):
-            val = val.lower() == "true"
-        else:
-            val = val.strip('"').strip("'")
-        result[key] = val
-    return result
-
-
 class AIClient:
+    """Brain LLM — DeepSeek on OpenRouter for reasoning and tool calling."""
+
     def __init__(self):
-        self.base_url = LLM_BASE_URL.rstrip("/")
-        self.model = LLM_MODEL
-        self.api_key = LLM_API_KEY
-        self._is_gemma = "gemma" in self.model.lower()
-        self._headers = {}
-        if self.api_key:
-            self._headers["Authorization"] = f"Bearer {self.api_key}"
+        self.base_url = OPENROUTER_BASE_URL.rstrip("/")
+        self.model = OPENROUTER_MODEL
+        self._headers = {
+            "HTTP-Referer": "https://github.com/ai-eink-friend",
+            "X-Title": "AI E-Ink Friend",
+        }
+        if OPENROUTER_API_KEY:
+            self._headers["Authorization"] = f"Bearer {OPENROUTER_API_KEY}"
+        self._vision = VisionClient()
 
     def chat_with_tools(self, messages: list, tools: list = None) -> dict:
         payload = {
@@ -99,28 +77,7 @@ class AIClient:
                 "arguments": args,
             })
 
-        raw_content = msg.get("content") or ""
-        content = _clean(raw_content) if self._is_gemma else raw_content.strip()
-
-        # Gemma on llama.cpp sometimes emits tool calls as inline text
-        if not tool_calls and self._is_gemma:
-            for m in INLINE_TOOL_RE.finditer(content):
-                name = m.group(1)
-                args = _parse_inline_args(m.group(2))
-                tool_calls.append({
-                    "id": f"call_{len(tool_calls)}",
-                    "name": name,
-                    "arguments": args,
-                })
-            if tool_calls:
-                content = _clean(INLINE_TOOL_RE.sub("", content))
-
-        if self._is_gemma:
-            for tc in tool_calls:
-                for k, v in tc["arguments"].items():
-                    if isinstance(v, str):
-                        tc["arguments"][k] = _clean(v)
-
+        content = (msg.get("content") or "").strip()
         return {
             "content": content,
             "reasoning": (msg.get("reasoning_content") or "").strip(),
@@ -129,6 +86,49 @@ class AIClient:
         }
 
     def compact(self, text: str) -> str:
+        """Summarize old context using the local Gemma model (free)."""
+        return self._vision.compact(text)
+
+
+class VisionClient:
+    """Local Gemma on llama.cpp — vision descriptions and compaction."""
+
+    def __init__(self):
+        self.base_url = VISION_BASE_URL.rstrip("/")
+        self.model = VISION_MODEL
+        self._headers = {}
+        if VISION_API_KEY:
+            self._headers["Authorization"] = f"Bearer {VISION_API_KEY}"
+
+    def describe(self, image_data_uri: str) -> str:
+        """Send a photo to local Gemma and get a text description."""
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": VISION_PROMPT},
+                    {"type": "image_url", "image_url": {"url": image_data_uri}},
+                ],
+            }
+        ]
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": 512,
+            "temperature": 0.3,
+        }
+        resp = requests.post(
+            f"{self.base_url}/chat/completions",
+            headers=self._headers,
+            json=payload,
+            timeout=VISION_TIMEOUT,
+        )
+        resp.raise_for_status()
+        raw = resp.json()["choices"][0]["message"]["content"]
+        return _clean(raw)
+
+    def compact(self, text: str) -> str:
+        """Summarize old context using local Gemma (free)."""
         messages = [
             {"role": "user", "content": f"Summarize these observations and interactions concisely, preserving key events, decisions, and patterns. Pay attention to timestamps to understand the sequence and timing of events:\n\n{text}"}
         ]
@@ -145,4 +145,4 @@ class AIClient:
             timeout=LLM_TIMEOUT,
         )
         resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"].strip()
+        return _clean(resp.json()["choices"][0]["message"]["content"])
