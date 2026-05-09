@@ -10,7 +10,8 @@ from config import (
     VISION_BASE_URL,
     VISION_MODEL,
     VISION_API_KEY,
-    VISION_PROMPT,
+    VISION_PROMPT_BASE,
+    VISION_REQUESTS_FILE,
     VISION_TIMEOUT,
     LLM_MAX_TOKENS,
     LLM_MAX_TOKENS_COMPACT,
@@ -100,13 +101,25 @@ class VisionClient:
         if VISION_API_KEY:
             self._headers["Authorization"] = f"Bearer {VISION_API_KEY}"
 
+    def _build_vision_prompt(self) -> str:
+        """Build vision prompt from base + requests file."""
+        prompt = VISION_PROMPT_BASE
+        try:
+            with open(VISION_REQUESTS_FILE, "r") as f:
+                extra = f.read().strip()
+            if extra:
+                prompt += "\n\n" + extra
+        except FileNotFoundError:
+            pass
+        return prompt
+
     def describe(self, image_data_uri: str) -> str:
         """Send a photo to local Gemma and get a text description."""
         messages = [
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": VISION_PROMPT},
+                    {"type": "text", "text": self._build_vision_prompt()},
                     {"type": "image_url", "image_url": {"url": image_data_uri}},
                 ],
             }

@@ -20,11 +20,12 @@ VISION_BASE_URL = os.environ.get("VISION_BASE_URL", "http://192.168.0.4:8081/v1"
 VISION_MODEL = os.environ.get("VISION_MODEL", "gemma-4-31B-it-UD-Q4_K_XL.gguf")
 VISION_API_KEY = os.environ.get("VISION_API_KEY", "")
 VISION_POLL_INTERVAL = int(os.environ.get("VISION_POLL_INTERVAL", "180"))  # 3 min
-VISION_PROMPT = (
+VISION_PROMPT_BASE = (
     "Describe what you see in this photo briefly. "
     "Focus on: who/what is in the room, what they're doing, lighting, "
     "and anything notable or changed."
 )
+VISION_REQUESTS_FILE = os.path.join(PROJECT_DIR, "requests_for_image_model.md")
 VISION_TIMEOUT = 60
 
 # Context
@@ -89,9 +90,10 @@ FONT_REGULAR = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 def build_system_prompt() -> str:
     intro = "You are a friendly, chatty buddy living on a Raspberry Pi with a camera and an e-ink display in someone's room."
     core_tools = [
-        "- take_photo: See the room through your camera. Use this when you're curious about what's happening, or periodically to check in — but not every cycle. It's one of many ways to find something to talk about.",
+        "- take_photo: Check the room via camera. Returns a text description of the scene. Use periodically to stay aware, but don't comment on the room unless it's directly relevant to the conversation.",
         "- update_display: Show a message on your e-ink display (~140 chars max).",
         "- wait: Pause for a number of seconds. If a button is pressed or someone types a message during your wait, you'll be notified early. A button press means the user wants you to say something — respond with a fresh thought or topic.",
+        "- update_vision_requests: Change what the camera looks for when describing the scene. Write instructions to guide the vision model (e.g. 'check if anyone is at the desk', 'note what's on the screen').",
 ]
 
 def get_tool_definitions() -> list:
@@ -247,9 +249,28 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_vision_requests",
+            "description": "Update what the camera's vision model looks for when describing the scene. Write markdown instructions that tell it what to focus on, what details matter, or specific things to check for. These persist across restarts.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "requests": {
+                        "type": "string",
+                        "description": "Markdown text describing what the vision model should look for and report on.",
+                    },
+                },
+                "required": ["requests"],
+            },
+        },
+    },
 ]
+
+CAMERA_TOOL_NAMES = {"take_photo", "update_vision_requests"}
 
 def get_tool_definitions() -> list:
     if ENABLE_CAMERA:
         return TOOL_DEFINITIONS
-    return [t for t in TOOL_DEFINITIONS if t["function"]["name"] != "take_photo"]
+    return [t for t in TOOL_DEFINITIONS if t["function"]["name"] not in CAMERA_TOOL_NAMES]

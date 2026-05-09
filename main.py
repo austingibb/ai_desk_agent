@@ -28,6 +28,7 @@ from config import (
     LLM_ESTIMATED_MAX_TOKENS,
     ENABLE_CAMERA,
     VISION_POLL_INTERVAL,
+    VISION_REQUESTS_FILE,
 )
 from notifications import NotificationStore
 from context import Context
@@ -282,6 +283,8 @@ class Orchestrator:
         elif name == "wait":
             play_sound("wait")
             return self._tool_wait(args)
+        elif name == "update_vision_requests":
+            return self._tool_update_vision_requests(args)
         elif name == "propose_notification":
             play_sound("update_display")
             return self._tool_propose_notification(args)
@@ -313,6 +316,18 @@ class Orchestrator:
             "captured_at": captured_at,
             "age_seconds": age,
         }
+
+    def _tool_update_vision_requests(self, args: dict) -> dict:
+        requests_text = args.get("requests", "").strip()
+        if not requests_text:
+            return {"status": "error", "message": "No requests text provided"}
+        try:
+            with open(VISION_REQUESTS_FILE, "w") as f:
+                f.write(f"# Requests for Image Model\n\n{requests_text}\n")
+            print(f"[VISION] Requests updated: {requests_text[:100]}...")
+            return {"status": "ok", "message": "Vision requests updated. Changes take effect on the next photo capture."}
+        except Exception as e:
+            return {"status": "error", "message": f"Failed to write requests file: {e}"}
 
     def _capture_and_describe(self) -> dict | None:
         """Capture a photo and get a text description from the local vision model."""
