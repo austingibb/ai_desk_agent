@@ -4,9 +4,9 @@ import json
 import re
 import requests
 from config import (
-    OPENROUTER_BASE_URL,
-    OPENROUTER_API_KEY,
-    OPENROUTER_MODEL,
+    LLM_BASE_URL,
+    LLM_API_KEY,
+    LLM_MODEL,
     VISION_BASE_URL,
     VISION_MODEL,
     VISION_API_KEY,
@@ -29,14 +29,14 @@ class AIClient:
     """Brain LLM — DeepSeek on OpenRouter for reasoning and tool calling."""
 
     def __init__(self):
-        self.base_url = OPENROUTER_BASE_URL.rstrip("/")
-        self.model = OPENROUTER_MODEL
+        self.base_url = LLM_BASE_URL.rstrip("/")
+        self.model = LLM_MODEL
         self._headers = {
             "HTTP-Referer": "https://github.com/ai-eink-friend",
             "X-Title": "AI E-Ink Friend",
         }
-        if OPENROUTER_API_KEY:
-            self._headers["Authorization"] = f"Bearer {OPENROUTER_API_KEY}"
+        if LLM_API_KEY:
+            self._headers["Authorization"] = f"Bearer {LLM_API_KEY}"
         self._vision = VisionClient()
 
     def chat_with_tools(self, messages: list, tools: list = None) -> dict:

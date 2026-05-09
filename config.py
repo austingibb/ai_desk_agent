@@ -8,9 +8,9 @@ load_dotenv(os.path.join(PROJECT_DIR, ".env"))
 DISPLAY_SERVER_URL = os.environ.get("DISPLAY_SERVER_URL", "http://192.168.0.38:5050")
 
 # Brain LLM — DeepSeek on OpenRouter
-OPENROUTER_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "deepseek/deepseek-chat")
+LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://openrouter.ai/api/v1")
+LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
+LLM_MODEL = os.environ.get("LLM_MODEL", "deepseek/deepseek-chat")
 LLM_MAX_TOKENS = 2048
 LLM_MAX_TOKENS_COMPACT = 1024
 LLM_TIMEOUT = 120
