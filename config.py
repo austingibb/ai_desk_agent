@@ -77,10 +77,10 @@ ROTATION = 0
 PIN_YES = 5
 PIN_NO = 6
 
-# Camera
-CAMERA_WIDTH = 640
-CAMERA_HEIGHT = 480
-JPEG_QUALITY = 70
+# Camera — use full sensor FOV to avoid center-crop zoom on IMX708
+CAMERA_WIDTH = 2304
+CAMERA_HEIGHT = 1296
+JPEG_QUALITY = 50
 ENABLE_CAMERA = os.environ.get("ENABLE_CAMERA", "1") == "1"
 
 # Font paths
