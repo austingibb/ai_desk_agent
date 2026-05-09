@@ -87,8 +87,26 @@ class AIClient:
         }
 
     def compact(self, text: str) -> str:
-        """Summarize old context using the local Gemma model (free)."""
-        return self._vision.compact(text)
+        """Summarize old context. Uses DeepSeek if API key is set, otherwise local Gemma."""
+        if not LLM_API_KEY:
+            return self._vision.compact(text)
+        messages = [
+            {"role": "user", "content": f"Summarize these observations and interactions concisely, preserving key events, decisions, and patterns. Pay attention to timestamps to understand the sequence and timing of events:\n\n{text}"}
+        ]
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": LLM_MAX_TOKENS_COMPACT,
+            "temperature": 0.3,
+        }
+        resp = requests.post(
+            f"{self.base_url}/chat/completions",
+            headers=self._headers,
+            json=payload,
+            timeout=LLM_TIMEOUT,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"].strip()
 
 
 class VisionClient:
@@ -113,8 +131,8 @@ class VisionClient:
             pass
         return prompt
 
-    def describe(self, image_data_uri: str) -> str:
-        """Send a photo to local Gemma and get a text description."""
+    def describe(self, image_data_uri: str, max_retries: int = 3) -> str:
+        """Send a photo to local Gemma and get a text description. Retries on empty."""
         messages = [
             {
                 "role": "user",
@@ -130,18 +148,20 @@ class VisionClient:
             "max_tokens": 512,
             "temperature": 0.3,
         }
-        resp = requests.post(
-            f"{self.base_url}/chat/completions",
-            headers=self._headers,
-            json=payload,
-            timeout=VISION_TIMEOUT,
-        )
-        resp.raise_for_status()
-        raw = resp.json()["choices"][0]["message"]["content"]
-        cleaned = _clean(raw)
-        if not cleaned:
-            print(f"[VISION] Raw response was cleaned to empty. Raw: {repr(raw[:200])}")
-        return cleaned
+        for attempt in range(max_retries):
+            resp = requests.post(
+                f"{self.base_url}/chat/completions",
+                headers=self._headers,
+                json=payload,
+                timeout=VISION_TIMEOUT,
+            )
+            resp.raise_for_status()
+            raw = resp.json()["choices"][0]["message"]["content"]
+            cleaned = _clean(raw)
+            if cleaned:
+                return cleaned
+            print(f"[VISION] Empty response (attempt {attempt + 1}/{max_retries}). Raw: {repr(raw[:200])}")
+        return ""
 
     def compact(self, text: str) -> str:
         """Summarize old context using local Gemma (free)."""
