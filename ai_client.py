@@ -145,7 +145,7 @@ class VisionClient:
         payload = {
             "model": self.model,
             "messages": messages,
-            "max_tokens": 512,
+            "max_tokens": 2048,
             "temperature": 0.3,
         }
         for attempt in range(max_retries):
@@ -156,9 +156,14 @@ class VisionClient:
                 timeout=VISION_TIMEOUT,
             )
             resp.raise_for_status()
-            raw = resp.json()["choices"][0]["message"]["content"]
+            data = resp.json()
+            choice = data["choices"][0]
+            finish = choice.get("finish_reason", "unknown")
+            raw = choice["message"]["content"]
             cleaned = _clean(raw)
             if cleaned:
+                if finish == "length":
+                    print(f"[VISION] Description truncated (hit max_tokens). Length: {len(cleaned)} chars")
                 return cleaned
             print(f"[VISION] Empty response (attempt {attempt + 1}/{max_retries}). Raw: {repr(raw[:200])}")
         return ""

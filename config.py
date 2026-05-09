@@ -26,7 +26,7 @@ VISION_PROMPT_BASE = (
     "and anything notable or changed."
 )
 VISION_REQUESTS_FILE = os.path.join(PROJECT_DIR, "requests_for_image_model.md")
-VISION_TIMEOUT = 60
+VISION_TIMEOUT = 120
 
 # Context
 COMPACT_AFTER_N_MESSAGES = int(os.environ.get("COMPACT_AFTER_N_MESSAGES", "150"))
