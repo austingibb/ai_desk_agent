@@ -221,6 +221,7 @@ class Orchestrator:
             # to immediately follow the assistant message, no interleaving)
             deferred_user_msgs = []
             enforced_wait = False
+            has_explicit_wait = any(tc["name"] == "wait" for tc in response["tool_calls"])
 
             for tc in response["tool_calls"]:
                 tool_call_count += 1
@@ -242,8 +243,8 @@ class Orchestrator:
                 if tc["name"] == "update_display" and result.get("status") == "ok":
                     enforced_wait = True
 
-            # Enforced wait after display update (added after all tool results)
-            if enforced_wait:
+            # Enforced wait after display update — skip if DeepSeek already called wait
+            if enforced_wait and not has_explicit_wait:
                 wait_result = self._tool_wait({})
                 print(f"[WAIT ENFORCED] display updated + wait ({wait_result.get('waited', 0)}s)")
                 with self.ctx_lock:
