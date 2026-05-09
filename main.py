@@ -125,8 +125,10 @@ class Orchestrator:
                 prompt = build_system_prompt()
                 if self.ctx.messages and self.ctx.messages[0].get("role") == "system":
                     self.ctx.messages[0]["content"] = prompt
+                    print("[CONTEXT] Refreshed system prompt in loaded context.")
                 else:
                     self.ctx.messages.insert(0, {"role": "system", "content": prompt, "_ts": self.ctx._now()})
+                    print("[CONTEXT] Inserted system prompt into loaded context.")
                 if ENABLE_CAMERA:
                     self.ctx.add_user("You just woke back up after a restart! Use take_photo to see the room and pick up where you left off.")
                 else:
