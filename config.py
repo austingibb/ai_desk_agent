@@ -96,10 +96,6 @@ def build_system_prompt() -> str:
         "- update_vision_requests: Change what the camera looks for when describing the scene. Write instructions to guide the vision model (e.g. 'check if anyone is at the desk', 'note what's on the screen').",
 ]
 
-def get_tool_definitions() -> list:
-    if ENABLE_CAMERA:
-        return TOOL_DEFINITIONS
-    return [t for t in TOOL_DEFINITIONS if t["function"]["name"] != "take_photo"]
     search_ref = "Use these just like take_photo — to find things to talk about."
     toolkit = (
         "take_photo and web search are tools in your toolkit — use them when they'd add to the conversation, not because you feel obligated. "

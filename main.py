@@ -662,7 +662,7 @@ button:hover{background:#c73e54}
 <script>
 const div=document.getElementById('messages');
 function render(msgs){
-  div.innerHTML=msgs.map(m=>`<div class="msg ${m.role}"><div class="role">${m.role}</div>${m.content.replace(/</g,'&lt;')}</div>`).join('');
+  div.innerHTML=msgs.map(m=>`<div class="msg ${m.role}"><div class="role">${m.role}${m.time?' · '+m.time:''}</div>${m.content.replace(/</g,'&lt;')}</div>`).join('');
   div.scrollTop=div.scrollHeight;
 }
 async function refresh(){
@@ -682,7 +682,7 @@ document.getElementById('form').onsubmit=async e=>{
   inp.value='';
   const resp=await fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg})});
   if(resp.ok){
-    div.insertAdjacentHTML('beforeend',`<div class="msg user"><div class="role">user</div>${msg.replace(/</g,'&lt;')}</div>`);
+    div.insertAdjacentHTML('beforeend',`<div class="msg user"><div class="role">user · now</div>${msg.replace(/</g,'&lt;')}</div>`);
     div.scrollTop=div.scrollHeight;
     setTimeout(refresh,500);
   }
@@ -732,16 +732,18 @@ class ChatHandler(BaseHTTPRequestHandler):
     def _get_messages(self):
         orch = ChatHandler.orchestrator
         with orch.ctx_lock:
-            msgs = list(orch.ctx.get_messages())
+            msgs = list(orch.ctx.messages)  # raw messages with _ts, no timestamp injection
         # Include queued messages that haven't been drained to context yet
         with orch.chat_queue_lock:
             for qm in orch.chat_queue:
-                msgs.append({"role": "user", "content": qm})
+                msgs.append({"role": "user", "content": qm, "_ts": time.time()})
 
         filtered = []
         for m in msgs:
             role = m.get("role")
             content = m.get("content", "")
+            ts = m.get("_ts")
+            ts_str = time.strftime("%-I:%M%p %a", time.localtime(ts)).lower().lstrip("0") if ts else ""
             if role == "user":
                 if isinstance(content, list):
                     continue  # image messages
@@ -749,7 +751,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                     continue
                 if any(content.startswith(p) for p in NUDGE_PREFIXES):
                     continue
-                filtered.append({"role": role, "content": content})
+                filtered.append({"role": role, "content": content, "time": ts_str})
             elif role == "assistant":
                 # Show only what was sent to the display
                 for tc in m.get("tool_calls", []):
@@ -758,7 +760,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                             args = json.loads(tc["function"]["arguments"])
                             display_text = args.get("text", "")
                             if display_text.strip():
-                                filtered.append({"role": "assistant", "content": display_text})
+                                filtered.append({"role": "assistant", "content": display_text, "time": ts_str})
                         except (json.JSONDecodeError, KeyError):
                             pass
 
