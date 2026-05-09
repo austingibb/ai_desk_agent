@@ -91,6 +91,7 @@ class Orchestrator:
         # Vision background thread state
         self.latest_scene = None  # {"description": str, "timestamp": float}
         self.scene_lock = threading.Lock()
+        self.vision_requests_shown = False  # tracks if we've shown existing requests this turn
 
         try:
             print("Init MCP client...")
@@ -345,9 +346,34 @@ class Orchestrator:
         requests_text = args.get("requests", "").strip()
         if not requests_text:
             return {"status": "error", "message": "No requests text provided"}
+
+        # Read current contents so the AI can see what's already there
+        current = ""
+        try:
+            with open(VISION_REQUESTS_FILE, "r") as f:
+                current = f.read().strip()
+        except FileNotFoundError:
+            pass
+
+        # First call with existing content: bounce back so the AI can merge
+        if current and not self.vision_requests_shown:
+            self.vision_requests_shown = True
+            print(f"[VISION] Bouncing update_vision_requests — showing existing requests first")
+            return {
+                "status": "needs_retry",
+                "message": (
+                    "STOP — the vision requests file already has content. "
+                    "Review the existing requests below and call update_vision_requests again "
+                    "with your new requests MERGED with the existing ones. "
+                    "Don't drop existing requests unless they're truly no longer needed."
+                ),
+                "current_requests": current,
+            }
+
         try:
             with open(VISION_REQUESTS_FILE, "w") as f:
                 f.write(f"# Requests for Image Model\n\n{requests_text}\n")
+            self.vision_requests_shown = False  # reset so next update bounces again
             print(f"[VISION] Requests updated: {requests_text[:100]}...")
             return {"status": "ok", "message": "Vision requests updated. Changes take effect on the next photo capture."}
         except Exception as e:
@@ -677,11 +703,15 @@ CHAT_HTML = """<!DOCTYPE html>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:system-ui,sans-serif;background:#1a1a2e;color:#e0e0e0;height:100vh;display:flex;flex-direction:column}
-#messages{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:8px}
-.msg{padding:10px 14px;border-radius:12px;max-width:80%;word-wrap:break-word;line-height:1.4}
-.user{align-self:flex-end;background:#0f3460;color:#e0e0e0}
-.assistant{align-self:flex-start;background:#16213e;color:#e0e0e0}
-.role{font-size:11px;opacity:0.6;margin-bottom:2px}
+#messages{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:12px}
+.msg-wrap{display:flex;flex-direction:column;max-width:80%}
+.msg-wrap.user{align-self:flex-end}
+.msg-wrap.assistant{align-self:flex-start}
+.role{font-size:11px;opacity:0.6;margin-bottom:3px;padding:0 4px}
+.msg-wrap.user .role{text-align:right}
+.msg{padding:10px 14px;border-radius:12px;word-wrap:break-word;line-height:1.4}
+.msg-wrap.user .msg{background:#0f3460;color:#e0e0e0}
+.msg-wrap.assistant .msg{background:#16213e;color:#e0e0e0}
 #form{display:flex;gap:8px;padding:12px;background:#16213e;border-top:1px solid #0f3460}
 #input{flex:1;padding:10px 14px;border:1px solid #0f3460;border-radius:20px;background:#1a1a2e;color:#e0e0e0;font-size:15px;outline:none}
 #input:focus{border-color:#e94560}
@@ -693,7 +723,7 @@ button:hover{background:#c73e54}
 <script>
 const div=document.getElementById('messages');
 function render(msgs){
-  div.innerHTML=msgs.map(m=>`<div class="msg ${m.role}"><div class="role">${m.role}${m.time?' · '+m.time:''}</div>${m.content.replace(/</g,'&lt;')}</div>`).join('');
+  div.innerHTML=msgs.map(m=>`<div class="msg-wrap ${m.role}"><div class="role">${m.role}${m.time?' · '+m.time:''}</div><div class="msg">${m.content.replace(/</g,'&lt;')}</div></div>`).join('');
   div.scrollTop=div.scrollHeight;
 }
 async function refresh(){
@@ -713,7 +743,7 @@ document.getElementById('form').onsubmit=async e=>{
   inp.value='';
   const resp=await fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg})});
   if(resp.ok){
-    div.insertAdjacentHTML('beforeend',`<div class="msg user"><div class="role">user · now</div>${msg.replace(/</g,'&lt;')}</div>`);
+    div.insertAdjacentHTML('beforeend',`<div class="msg-wrap user"><div class="role">user · now</div><div class="msg">${msg.replace(/</g,'&lt;')}</div></div>`);
     div.scrollTop=div.scrollHeight;
     setTimeout(refresh,500);
   }
