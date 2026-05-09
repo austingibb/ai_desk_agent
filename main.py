@@ -121,6 +121,12 @@ class Orchestrator:
         with self.ctx_lock:
             if self.ctx.load():
                 print("Resuming from saved context.")
+                # Always refresh system prompt to pick up changes
+                prompt = build_system_prompt()
+                if self.ctx.messages and self.ctx.messages[0].get("role") == "system":
+                    self.ctx.messages[0]["content"] = prompt
+                else:
+                    self.ctx.messages.insert(0, {"role": "system", "content": prompt, "_ts": self.ctx._now()})
                 if ENABLE_CAMERA:
                     self.ctx.add_user("You just woke back up after a restart! Use take_photo to see the room and pick up where you left off.")
                 else:
