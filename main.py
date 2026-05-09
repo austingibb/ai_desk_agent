@@ -75,6 +75,8 @@ class Orchestrator:
         self.running = True
         self.last_display_time = 0
         self.chat_event = threading.Event()
+        self.chat_queue = []       # queued chat messages (added by handler, drained by main loop)
+        self.chat_queue_lock = threading.Lock()
         self.ctx_lock = threading.Lock()
         self.backoff = BACKOFF_BASE
         self.mcp_tools = []
@@ -148,6 +150,15 @@ class Orchestrator:
             tools = list(get_tool_definitions())
             if self.mcp_tools:
                 tools.extend(self.mcp_tools)
+
+            # Drain queued chat messages into context at a safe point
+            with self.chat_queue_lock:
+                queued = list(self.chat_queue)
+                self.chat_queue.clear()
+            if queued:
+                with self.ctx_lock:
+                    for msg in queued:
+                        self.ctx.add_user(msg)
 
             with self.ctx_lock:
                 self.ctx._repair_pairing()
@@ -674,6 +685,10 @@ class ChatHandler(BaseHTTPRequestHandler):
         orch = ChatHandler.orchestrator
         with orch.ctx_lock:
             msgs = list(orch.ctx.get_messages())
+        # Include queued messages that haven't been drained to context yet
+        with orch.chat_queue_lock:
+            for qm in orch.chat_queue:
+                msgs.append({"role": "user", "content": qm})
 
         filtered = []
         for m in msgs:
@@ -733,8 +748,8 @@ class ChatHandler(BaseHTTPRequestHandler):
             orch.notification_store.record_acknowledgment(orch.last_fired_notification_id)
             orch.last_fired_notification_id = None
 
-        with orch.ctx_lock:
-            orch.ctx.add_user(message)
+        with orch.chat_queue_lock:
+            orch.chat_queue.append(message)
         orch.chat_event.set()
         orch._reset_backoff()
         print(f"[CHAT] User message: {message[:100]}")
