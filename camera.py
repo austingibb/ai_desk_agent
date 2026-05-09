@@ -10,6 +10,7 @@ from config import CAMERA_WIDTH, CAMERA_HEIGHT, JPEG_QUALITY
 class Camera:
     def __init__(self):
         self.picam = Picamera2()
+        # Capture at full sensor resolution for widest FOV
         config = self.picam.create_still_configuration(
             main={"size": (CAMERA_WIDTH, CAMERA_HEIGHT)},
         )
@@ -21,6 +22,10 @@ class Camera:
         try:
             arr = request.make_array("main")
             img = Image.fromarray(arr)
+            # Downscale to 640px wide for LLM, preserving aspect ratio
+            if img.width > 640:
+                ratio = 640 / img.width
+                img = img.resize((640, int(img.height * ratio)), Image.LANCZOS)
             stream = io.BytesIO()
             img.save(stream, format="JPEG", quality=JPEG_QUALITY)
             jpeg_bytes = stream.getvalue()
