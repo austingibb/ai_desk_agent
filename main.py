@@ -21,7 +21,6 @@ from config import (
     BACKOFF_BASE,
     BACKOFF_MAX,
     REVIEW_INTERVAL,
-    MAX_PROPOSAL_INTERVAL,
     CATEGORY_COOLDOWN_REVIEWS,
     POLICY_REMINDER,
     estimate_tool_tokens,
@@ -85,7 +84,7 @@ class Orchestrator:
         self.notification_store = NotificationStore()
         self.last_review_time = time.time()
         self.last_fired_notification_id = None
-        self.last_proposal_time = 0.0
+        self.active_notification = None  # {"id": str, "message": str, "remaining": int}
         self.proposal_category_cooldowns = {}
 
         # Vision background thread state
@@ -563,20 +562,11 @@ class Orchestrator:
         if len(message) > 100:
             return {"status": "error", "message": "Message too long (max 100 chars)"}
 
+        # Expire any existing pending proposal so the new one can replace it
         if self.notification_store.has_pending_proposal():
-            return {
-                "status": "error",
-                "message": "A proposal is already pending. Wait for the user to respond first.",
-            }
+            self.notification_store.expire_pending()
 
-        if time.time() - self.last_proposal_time < MAX_PROPOSAL_INTERVAL:
-            remaining = int(MAX_PROPOSAL_INTERVAL - (time.time() - self.last_proposal_time))
-            return {
-                "status": "error",
-                "message": f"Rate limited. Can propose again in {remaining}s.",
-            }
 
-        self.last_proposal_time = time.time()
         notif = self.notification_store.create_proposal(
             message, category, trigger_type, trigger_value
         )
