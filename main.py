@@ -313,6 +313,8 @@ class Orchestrator:
         elif name == "propose_notification":
             play_sound("update_display")
             return self._tool_propose_notification(args)
+        elif name == "schedule_notification":
+            return self._tool_schedule_notification(args)
         else:
             if self.mcp:
                 play_sound("search")
@@ -517,7 +519,7 @@ class Orchestrator:
                 self._reset_backoff()
                 waited = int(time.monotonic() - start)
                 print(f"[NOTIF] Due notification fired: {due['id']}")
-                return {"status": "interrupted", "reason": "notification_due", "waited": waited, "user_message": f'[Notification] Time to show: "{due["message"]}"'}
+                return {"status": "interrupted", "reason": "notification_due", "waited": waited, "user_message": f'[Notification] id={due["id"]} — Time to show: "{due["message"]}"\nAfter showing it (or deferring), call schedule_notification with this ID to set when it fires next.'}
 
             result = http_get("/buttons/state", timeout=2)
             if result.get("button"):
@@ -584,6 +586,18 @@ class Orchestrator:
             "status": "ok",
             "message": f"Proposal saved. Now show it to the user with update_display: '{message} — press button to approve!'",
         }
+
+    def _tool_schedule_notification(self, args: dict) -> dict:
+        notif_id = args.get("notification_id", "")
+        seconds = args.get("seconds", 600)
+        if not notif_id:
+            return {"status": "error", "message": "No notification_id provided"}
+        seconds = max(60, min(7200, int(seconds)))
+        result = self.notification_store.schedule(notif_id, seconds)
+        if result:
+            print(f"[NOTIF] Scheduled {notif_id} to fire in {seconds}s")
+            return {"status": "ok", "message": f"Scheduled to fire again in {seconds}s ({seconds//60}min)."}
+        return {"status": "error", "message": f"Notification {notif_id} not found"}
 
     def _detect_patterns(self) -> str | None:
         patterns = []

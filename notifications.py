@@ -3,7 +3,7 @@
 import os
 import json
 import time as _time
-from config import PROJECT_DIR, MAX_FIRINGS_PER_HOUR
+from config import PROJECT_DIR
 
 NOTIFICATIONS_FILE = os.path.join(PROJECT_DIR, "notifications.json")
 
@@ -69,6 +69,7 @@ class NotificationStore:
             if n["status"] == "proposed":
                 n["status"] = "approved"
                 n["decided_at"] = _time.time()
+                n["next_fire"] = _time.time()  # fire immediately on first approval
                 cat = n["category"]
                 self.category_scores[cat] = min(1.0, self.category_scores.get(cat, 0.0) + 0.2)
                 self._save()
@@ -99,33 +100,22 @@ class NotificationStore:
 
     def get_due_notification(self):
         now = _time.time()
-        if now - self._last_fire_time < (3600 // MAX_FIRINGS_PER_HOUR):
+        # Global cooldown: don't fire any notification within 5 min of the last one
+        if now - self._last_fire_time < 300:
             return None
 
         due = []
         for n in self.notifications:
             if n["status"] != "approved":
                 continue
-
-            if n["trigger_type"] == "interval":
-                interval = int(n["trigger_value"])
-                if n["last_fired"] is None or now - n["last_fired"] >= interval:
-                    due.append(n)
-            elif n["trigger_type"] == "time_of_day":
-                current_time = _time.strftime("%H:%M")
-                if n["trigger_value"] == current_time:
-                    if n["last_fired"] is None:
-                        due.append(n)
-                    else:
-                        last_day = _time.strftime("%Y-%m-%d", _time.localtime(n["last_fired"]))
-                        today = _time.strftime("%Y-%m-%d")
-                        if last_day != today:
-                            due.append(n)
+            next_fire = n.get("next_fire")
+            if next_fire is not None and now >= next_fire:
+                due.append(n)
 
         if not due:
             return None
 
-        due.sort(key=lambda n: n["decay_score"], reverse=True)
+        due.sort(key=lambda n: n.get("next_fire", 0))
         return due[0]
 
     def record_firing(self, notification_id):
@@ -133,9 +123,18 @@ class NotificationStore:
             if n["id"] == notification_id:
                 n["last_fired"] = _time.time()
                 n["fire_count"] += 1
+                n["next_fire"] = None  # AI must schedule the next one
                 self._last_fire_time = n["last_fired"]
                 self._save()
                 return
+
+    def schedule(self, notification_id, seconds):
+        for n in self.notifications:
+            if n["id"] == notification_id:
+                n["next_fire"] = _time.time() + seconds
+                self._save()
+                return n
+        return None
 
     def record_acknowledgment(self, notification_id):
         for n in self.notifications:
@@ -171,16 +170,16 @@ class NotificationStore:
                     if last
                     else "never"
                 )
-                if n["trigger_type"] == "interval":
-                    val = str(int(n["trigger_value"]) // 60)
-                    unit = "min"
+                next_fire = n.get("next_fire")
+                if next_fire is None:
+                    schedule_str = "UNSCHEDULED — call schedule_notification to set next fire time"
                 else:
-                    val = n["trigger_value"]
-                    unit = ""
+                    mins_left = max(0, int((next_fire - _time.time()) / 60))
+                    schedule_str = f"next fire in ~{mins_left}min"
                 lines.append(
-                    f'"{n["message"]}" ({n["category"]}, every {val}{unit}, last fired {last_str})'
+                    f'id={n["id"]} "{n["message"]}" ({n["category"]}, last fired {last_str}, {schedule_str})'
                 )
-            parts.append(f"Active notifications ({len(active)}): {', '.join(lines)}.")
+            parts.append(f"Active notifications ({len(active)}):\n" + "\n".join(f"  - {l}" for l in lines))
 
         expired = [n for n in self.notifications if n["status"] == "expired"]
         if expired:

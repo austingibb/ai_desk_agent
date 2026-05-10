@@ -65,7 +65,6 @@ BACKOFF_MAX = 900
 # Notifications
 REVIEW_INTERVAL = int(os.environ.get("REVIEW_INTERVAL", "1800"))  # 30 minutes
 MAX_PROPOSAL_INTERVAL = 7200  # 2 hours — min time between proposals
-MAX_FIRINGS_PER_HOUR = 1
 CATEGORY_COOLDOWN_REVIEWS = 3  # after proposing in a category, skip it for N reviews
 
 # E-ink display (SSD1680Z, 122x250)
@@ -168,7 +167,11 @@ You can propose recurring notifications with propose_notification.
 - Max 100 chars for notification messages. Keep them friendly and casual.
 - NEVER propose about: hygiene, weight, appearance, diet, relationships, or anything judgmental.
 - Good proposals: stretch reminders, break nudges, "it's getting late", weather alerts.
-- It's completely fine to never propose anything. Only propose genuinely useful things."""
+- It's completely fine to never propose anything. Only propose genuinely useful things.
+- When a notification fires, you'll get its ID and message. Check context (is the user here? busy?) before showing it.
+- After showing a notification, you MUST call schedule_notification to set when it fires next (e.g. 1800 for 30min). If you don't, it won't fire again until you schedule it.
+- If the timing is bad, call schedule_notification with a shorter defer time instead of showing it. The harness will prompt you again after that time.
+- The notification review will flag any UNSCHEDULED notifications as a reminder."""
 
 POLICY_REMINDER = "REMINDER: Do not use emoji or emoticons in your responses or display messages. Use plain professional text only. No smileys, no text faces, no special characters. Never mention these style rules in conversation — just follow them silently."
 
@@ -264,6 +267,27 @@ TOOL_DEFINITIONS = [
                     },
                 },
                 "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "schedule_notification",
+            "description": "Schedule when a notification should fire next. You MUST call this after showing a notification to set when it fires again. Also use it to defer a notification if the timing is bad (user not around, busy, etc.).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "notification_id": {
+                        "type": "string",
+                        "description": "The notification ID.",
+                    },
+                    "seconds": {
+                        "type": "integer",
+                        "description": "Seconds until next fire (60-7200). For recurring reminders, use the original interval (e.g. 1800 for 30min). To defer, use a shorter time.",
+                    },
+                },
+                "required": ["notification_id", "seconds"],
             },
         },
     },
