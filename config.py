@@ -171,7 +171,8 @@ You can propose recurring notifications with propose_notification.
 - When a notification fires, you'll get its ID and message. Check context (is the user here? busy?) before showing it.
 - After showing a notification, you MUST call schedule_notification to set when it fires next (e.g. 1800 for 30min). If you don't, it won't fire again until you schedule it.
 - If the timing is bad, call schedule_notification with a shorter defer time instead of showing it. The harness will prompt you again after that time.
-- The notification review will flag any UNSCHEDULED notifications as a reminder."""
+- The notification review will flag any UNSCHEDULED notifications as a reminder.
+- PERSISTENCE: After you show a notification, it is NOT done until the user acknowledges it with a button press or a chat response. Keep appending the notification message to your next 3 display updates (e.g. add a line like "!! <notification message>" at the end). If the user presses a button or sends a chat message before 3 displays, consider it acknowledged and stop. If they don't respond after 3 displays, let it go."""
 
 POLICY_REMINDER = "REMINDER: Do not use emoji or emoticons in your responses or display messages. Use plain professional text only. No smileys, no text faces, no special characters. Never mention these style rules in conversation — just follow them silently."
 
