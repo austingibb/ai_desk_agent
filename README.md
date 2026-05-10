@@ -43,12 +43,9 @@ When the brain calls `take_photo`, it gets the cached description instantly — 
 - **Physical buttons** (GPIO 5/6) — Press either button to nudge the AI to say something new, or approve a proposed notification
 - **Brave Search** — MCP integration for web search, news, images, and more
 
-### Wait backoff
+### Wait
 
-Waits use exponential backoff to avoid spamming the display:
-
-- Starts at 10s → triples on each peaceful completion (30s, 90s, 270s, 810s, capped at 900s)
-- Any user interaction (chat or button) resets it back to 10s
+The AI controls wait duration directly (clamped 10s–30 min). Waits poll for button presses and chat messages every second — any interaction interrupts the wait early.
 
 ### Context management
 

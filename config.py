@@ -55,12 +55,11 @@ BUTTON_RESPONSE_TIMEOUT = 300
 # Tool calling limits
 MAX_TOOL_CALLS_PER_TURN = 10
 MIN_DISPLAY_INTERVAL = 10
-MAX_WAIT_SECONDS = 600
+MIN_WAIT_SECONDS = 10
+MAX_WAIT_SECONDS = 1800
 IDLE_TIMEOUT = 60
 BUTTON_CHECK_INTERVAL = 1
 CHAT_SERVER_PORT = 8080
-BACKOFF_BASE = 10
-BACKOFF_MAX = 900
 
 # Notifications
 REVIEW_INTERVAL = int(os.environ.get("REVIEW_INTERVAL", "1800"))  # 30 minutes
@@ -210,13 +209,13 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "wait",
-            "description": "Pause for a number of seconds. If a button is pressed or a chat message arrives, you'll be notified early. A button press is a nudge — the user wants you to say something!",
+            "description": "Pause for a number of seconds (10s min, 30min max). If a button is pressed or a chat message arrives, you'll be notified early. A button press is a nudge — the user wants you to say something!",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "seconds": {
                         "type": "integer",
-                        "description": "Number of seconds to wait. Use 5-30 seconds normally. Only use 60+ if the user said they're done talking or leaving.",
+                        "description": "Number of seconds to wait. Use brief waits (10-60s) during conversation. Use longer rests (minutes) when the room is empty or they seem to be gone.",
                     },
                 },
                 "required": ["seconds"],

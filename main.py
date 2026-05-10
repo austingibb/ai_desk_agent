@@ -14,12 +14,11 @@ from config import (
     get_tool_definitions,
     MAX_TOOL_CALLS_PER_TURN,
     MIN_DISPLAY_INTERVAL,
+    MIN_WAIT_SECONDS,
     MAX_WAIT_SECONDS,
     IDLE_TIMEOUT,
     BUTTON_CHECK_INTERVAL,
     CHAT_SERVER_PORT,
-    BACKOFF_BASE,
-    BACKOFF_MAX,
     REVIEW_INTERVAL,
     CATEGORY_COOLDOWN_REVIEWS,
     POLICY_REMINDER,
@@ -78,7 +77,6 @@ class Orchestrator:
         self.chat_queue = []       # queued chat messages (added by handler, drained by main loop)
         self.chat_queue_lock = threading.Lock()
         self.ctx_lock = threading.Lock()
-        self.backoff = BACKOFF_BASE
         self.mcp_tools = []
         self.mcp = None
         self.notification_store = NotificationStore()
@@ -107,9 +105,6 @@ class Orchestrator:
     def _handle_signal(self, signum, frame):
         print("\nShutting down...")
         self.running = False
-
-    def _reset_backoff(self):
-        self.backoff = BACKOFF_BASE
 
     def run(self):
         print("Init camera...")
@@ -240,8 +235,6 @@ class Orchestrator:
             # all tool results are added (OpenRouter requires tool results
             # to immediately follow the assistant message, no interleaving)
             deferred_user_msgs = []
-            enforced_wait = False
-            has_explicit_wait = any(tc["name"] == "wait" for tc in response["tool_calls"])
 
             for tc in response["tool_calls"]:
                 tool_call_count += 1
@@ -259,29 +252,6 @@ class Orchestrator:
                 user_msg = result.get("user_message")
                 if user_msg:
                     deferred_user_msgs.append(user_msg)
-
-                if tc["name"] in ("update_display", "send_chat_message") and result.get("status") == "ok":
-                    enforced_wait = True
-
-            # Enforced wait after display update — skip if DeepSeek already called wait
-            if enforced_wait and not has_explicit_wait:
-                wait_result = self._tool_wait({})
-                print(f"[WAIT ENFORCED] display updated + wait ({wait_result.get('waited', 0)}s)")
-                with self.ctx_lock:
-                    wait_id = f"wait_{int(time.time())}"
-                    # Append wait to the assistant's tool_calls so pairing is valid
-                    for m in reversed(self.ctx.messages):
-                        if m.get("role") == "assistant" and m.get("tool_calls"):
-                            m["tool_calls"].append({
-                                "id": wait_id,
-                                "type": "function",
-                                "function": {"name": "wait", "arguments": "{}"},
-                            })
-                            break
-                    self.ctx.add_tool_result(wait_id, "wait", wait_result)
-                wait_user_msg = wait_result.get("user_message")
-                if wait_user_msg:
-                    deferred_user_msgs.append(wait_user_msg)
 
             # Now add deferred user messages (after all tool results)
             if deferred_user_msgs:
@@ -480,14 +450,13 @@ class Orchestrator:
         return {"status": "ok", "message": "Chat message sent and display preview shown."}
 
     def _tool_wait(self, args: dict) -> dict:
-        seconds = max(5, min(MAX_WAIT_SECONDS, self.backoff))
-        print(f"[WAIT] Sleeping {seconds}s (backoff={self.backoff}s)...")
+        seconds = max(MIN_WAIT_SECONDS, min(MAX_WAIT_SECONDS, int(args.get("seconds", 60))))
+        print(f"[WAIT] Sleeping {seconds}s...")
 
         start = time.monotonic()
         while time.monotonic() - start < seconds:
             if self.chat_event.is_set():
                 self.chat_event.clear()
-                self._reset_backoff()
                 waited = int(time.monotonic() - start)
                 print(f"[WAIT] Interrupted by chat message after {waited}s")
                 return {"status": "interrupted", "reason": "chat_message", "waited": waited}
@@ -496,18 +465,17 @@ class Orchestrator:
                 return {"status": "interrupted", "reason": "shutdown", "waited": int(time.monotonic() - start)}
 
             if time.time() - self.last_review_time > REVIEW_INTERVAL:
-                if self.backoff < 270:
-                    self.notification_store.expire_pending()
-                    self._tick_cooldowns()
-                    patterns = self._detect_patterns()
-                    cooldowns = {c: v for c, v in self.proposal_category_cooldowns.items() if v > 0}
-                    summary = self.notification_store.get_review_summary(
-                        patterns=patterns, cooldown_categories=cooldowns
-                    )
-                    self.last_review_time = time.time()
-                    waited = int(time.monotonic() - start)
-                    print(f"[WAIT] Interrupted by notification review after {waited}s")
-                    return {"status": "interrupted", "reason": "notification_review", "waited": waited, "user_message": summary}
+                self.notification_store.expire_pending()
+                self._tick_cooldowns()
+                patterns = self._detect_patterns()
+                cooldowns = {c: v for c, v in self.proposal_category_cooldowns.items() if v > 0}
+                summary = self.notification_store.get_review_summary(
+                    patterns=patterns, cooldown_categories=cooldowns
+                )
+                self.last_review_time = time.time()
+                waited = int(time.monotonic() - start)
+                print(f"[WAIT] Interrupted by notification review after {waited}s")
+                return {"status": "interrupted", "reason": "notification_review", "waited": waited, "user_message": summary}
 
             due = self.notification_store.get_due_notification()
             if due:
@@ -515,14 +483,12 @@ class Orchestrator:
                     self.notification_store.decay_unacknowledged(self.last_fired_notification_id)
                 self.notification_store.record_firing(due["id"])
                 self.last_fired_notification_id = due["id"]
-                self._reset_backoff()
                 waited = int(time.monotonic() - start)
                 print(f"[NOTIF] Due notification fired: {due['id']}")
                 return {"status": "interrupted", "reason": "notification_due", "waited": waited, "user_message": f'[Notification] id={due["id"]} — Time to show: "{due["message"]}"\nAfter showing it (or deferring), call schedule_notification with this ID to set when it fires next.'}
 
             result = http_get("/buttons/state", timeout=2)
             if result.get("button"):
-                self._reset_backoff()
                 http_post("/buttons/reset", {}, timeout=5)
                 waited = int(time.monotonic() - start)
 
@@ -546,8 +512,7 @@ class Orchestrator:
                 }
             time.sleep(BUTTON_CHECK_INTERVAL)
 
-        self.backoff = min(self.backoff * 3, BACKOFF_MAX)
-        print(f"[WAIT] Completed. Next backoff: {self.backoff}s")
+        print(f"[WAIT] Completed {seconds}s.")
         return {"status": "ok", "waited": seconds}
 
     def _tool_propose_notification(self, args: dict) -> dict:
@@ -645,11 +610,9 @@ class Orchestrator:
                 return
             if self.chat_event.is_set():
                 self.chat_event.clear()
-                self._reset_backoff()
                 return
             result = http_get("/buttons/state", timeout=2)
             if result.get("button"):
-                self._reset_backoff()
                 http_post("/buttons/reset", {}, timeout=5)
 
                 if self.notification_store.has_pending_proposal():
@@ -867,7 +830,6 @@ class ChatHandler(BaseHTTPRequestHandler):
         with orch.chat_queue_lock:
             orch.chat_queue.append(message)
         orch.chat_event.set()
-        orch._reset_backoff()
         print(f"[CHAT] User message: {message[:100]}")
 
         data = json.dumps({"status": "ok"}).encode()
