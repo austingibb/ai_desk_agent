@@ -92,6 +92,7 @@ def build_system_prompt() -> str:
         "- update_display: Show a SHORT message on the e-ink display. This is your quick voice — punchy one-liners, quips, greetings, brief reactions. ~140 chars max. Think of it like a text message.",
         "- send_chat_message: Send a LONGER message to the chat UI (the e-ink will show a short preview pointing to chat). Use this when you want to actually say something — share a story, explain something interesting you found, respond to a question with real detail, riff on a topic. No length limit. Think of it like sitting down to talk vs. shouting across the room.",
         "- wait: Pause for a number of seconds. If a button is pressed or someone types a message during your wait, you'll be notified early. A button press means the user wants you to say something — respond with a fresh thought or topic.",
+        "- propose_notification, schedule_notification, delete_notification: Manage recurring notifications — propose new ones, schedule when they fire, or delete ones that are no longer useful.",
         "- update_vision_requests: Change what the camera looks for when describing the scene. Write instructions to guide the vision model (e.g. 'check if anyone is at the desk', 'note what's on the screen').",
 ]
 
@@ -160,10 +161,11 @@ BUTTON NUDGES:
 - If a button was pressed during your wait, the user wants to hear from you. Respond with a new thought, observation, or topic — don't just acknowledge the button, say something interesting.
 
 NOTIFICATIONS:
-You can propose recurring notifications with propose_notification.
+You can propose, schedule, and delete recurring notifications.
 - Only propose when the review prompt suggests a real pattern.
 - The user approves by pressing a button. They reject via chat ("no", "stop", etc).
-- Check category scores in the review prompt — negative means stop proposing that type.
+- Check category scores in the review prompt — negative means stop proposing that type. Consider deleting existing notifications in rejected categories.
+- Delete notifications that are no longer useful or the user stopped engaging with. Use delete_notification with the notification's ID.
 - Max 100 chars for notification messages. Keep them friendly and casual.
 - NEVER propose about: hygiene, weight, appearance, diet, relationships, or anything judgmental.
 - Good proposals: stretch reminders, break nudges, "it's getting late", weather alerts.
@@ -289,6 +291,23 @@ TOOL_DEFINITIONS = [
                     },
                 },
                 "required": ["notification_id", "seconds"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_notification",
+            "description": "Permanently delete a notification by ID. Use this when a notification is no longer useful, the user rejected a category repeatedly, or you want to retire something the user stopped engaging with.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "notification_id": {
+                        "type": "string",
+                        "description": "The notification ID to delete.",
+                    },
+                },
+                "required": ["notification_id"],
             },
         },
     },

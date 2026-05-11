@@ -133,8 +133,12 @@ class NotificationStore:
             if n["id"] == notification_id:
                 n["next_fire"] = _time.time() + seconds
                 self._save()
-                return n
-        return None
+                return True
+        return False
+
+    def delete(self, notification_id):
+        self.notifications = [n for n in self.notifications if n["id"] != notification_id]
+        self._save()
 
     def record_acknowledgment(self, notification_id):
         for n in self.notifications:

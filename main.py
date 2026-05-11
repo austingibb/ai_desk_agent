@@ -284,6 +284,8 @@ class Orchestrator:
             return self._tool_propose_notification(args)
         elif name == "schedule_notification":
             return self._tool_schedule_notification(args)
+        elif name == "delete_notification":
+            return self._tool_delete_notification(args)
         else:
             if self.mcp:
                 play_sound("search")
@@ -553,6 +555,14 @@ class Orchestrator:
             print(f"[NOTIF] Scheduled {notif_id} to fire in {seconds}s")
             return {"status": "ok", "message": f"Scheduled to fire again in {seconds}s ({seconds//60}min)."}
         return {"status": "error", "message": f"Notification {notif_id} not found"}
+
+    def _tool_delete_notification(self, args: dict) -> dict:
+        notif_id = args.get("notification_id", "")
+        if not notif_id:
+            return {"status": "error", "message": "No notification_id provided"}
+        self.notification_store.delete(notif_id)
+        print(f"[NOTIF] Deleted {notif_id}")
+        return {"status": "ok", "message": f"Notification {notif_id} deleted."}
 
     def _detect_patterns(self) -> str | None:
         patterns = []
