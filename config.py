@@ -49,6 +49,9 @@ def estimate_tool_tokens(tools: list) -> int:
 
 KEEP_LAST_N_MESSAGES = 30
 
+MERGE_SUMMARIES_AFTER = int(os.environ.get("MERGE_SUMMARIES_AFTER", "20"))
+MERGE_SUMMARIES_TARGET = int(os.environ.get("MERGE_SUMMARIES_TARGET", "15"))
+
 # Retained for backward compat with buttons.py
 BUTTON_RESPONSE_TIMEOUT = 300
 

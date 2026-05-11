@@ -2,8 +2,9 @@
 
 import json
 import os
+import re
 import time as _time
-from config import COMPACT_AFTER_N_MESSAGES, KEEP_LAST_N_MESSAGES, PROJECT_DIR, TOKEN_ESTIMATE_DIVISOR
+from config import COMPACT_AFTER_N_MESSAGES, KEEP_LAST_N_MESSAGES, PROJECT_DIR, TOKEN_ESTIMATE_DIVISOR, MERGE_SUMMARIES_AFTER
 
 CONTEXT_FILE = os.path.join(PROJECT_DIR, "context.json")
 
@@ -295,6 +296,79 @@ class Context:
         self.messages = new_messages
         print(f"[CONTEXT] Compacted {len(to_compact)} messages into 1 summary (~{len(summary)} chars) [{date_label}], "
               f"preserved {len(existing_summaries)} prior summaries, keeping last {keep_count}")
+
+    def check_merge_summaries(self, ai_client):
+        """Merge, condense, or drop old compaction summaries. Only touches summary messages."""
+        summary_items = [(i, m) for i, m in enumerate(self.messages) if self._is_summary(m)]
+        if len(summary_items) <= MERGE_SUMMARIES_AFTER:
+            return
+
+        summaries_text = "\n\n---\n\n".join(m["content"] for _, m in summary_items)
+
+        try:
+            result = ai_client.merge_summaries(summaries_text)
+        except Exception as e:
+            print(f"[CONTEXT] Summary merge error: {e}")
+            return
+
+        merged = self._parse_merge_result(result)
+        if merged is None:
+            print(f"[CONTEXT] Summary merge produced unparseable output, skipping. Raw: {result[:200]}")
+            return
+        if len(merged) >= len(summary_items):
+            print(f"[CONTEXT] Summary merge produced {len(merged)} summaries (was {len(summary_items)}), skipping — not an improvement")
+            return
+
+        new_summaries = []
+        for item in merged:
+            if not isinstance(item, dict) or "time_range" not in item or "summary" not in item:
+                continue
+            new_summaries.append({
+                "role": "user",
+                "content": f"[Previous context summary: {item['time_range']}] {item['summary']}",
+                "_ts": self._now(),
+            })
+
+        if not new_summaries or len(new_summaries) >= len(summary_items):
+            print(f"[CONTEXT] Summary merge result invalid ({len(new_summaries)} valid summaries), skipping")
+            return
+
+        non_summaries = [m for m in self.messages if not self._is_summary(m)]
+        insert_at = 1 if non_summaries and non_summaries[0].get("role") == "system" else 0
+        non_summaries[insert_at:insert_at] = new_summaries
+        self.messages = non_summaries
+        print(f"[CONTEXT] Merged {len(summary_items)} summaries into {len(new_summaries)}")
+
+    @staticmethod
+    def _parse_merge_result(text: str) -> list | None:
+        """Robustly parse JSON array from LLM output. Handles code fences and surrounding text."""
+        if not text:
+            return None
+        sliced = text.strip()
+        try:
+            result = json.loads(sliced)
+            if isinstance(result, list):
+                return result
+        except json.JSONDecodeError:
+            pass
+        m = re.search(r"```(?:json)?\s*(\[[\s\S]*?\])\s*```", sliced)
+        if m:
+            try:
+                result = json.loads(m.group(1))
+                if isinstance(result, list):
+                    return result
+            except json.JSONDecodeError:
+                pass
+        start = sliced.find("[")
+        end = sliced.rfind("]")
+        if start != -1 and end > start:
+            try:
+                result = json.loads(sliced[start:end + 1])
+                if isinstance(result, list):
+                    return result
+            except json.JSONDecodeError:
+                pass
+        return None
 
     def _is_image_message(self, msg: dict) -> bool:
         content = msg.get("content", "")

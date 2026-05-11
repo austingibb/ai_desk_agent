@@ -174,6 +174,7 @@ class Orchestrator:
                 print(f"[LLM] Token estimate {estimated} exceeds limit {LLM_ESTIMATED_MAX_TOKENS}, compacting...")
                 with self.ctx_lock:
                     self.ctx.check_compact(self.ai)
+                    self.ctx.check_merge_summaries(self.ai)
                 with self.ctx_lock:
                     messages = self.ctx.get_messages()
                     msg_tokens = self.ctx.total_tokens()
@@ -190,6 +191,7 @@ class Orchestrator:
                     print(f"[LLM] Context overflow detected, triggering compaction...")
                     with self.ctx_lock:
                         self.ctx.check_compact(self.ai)
+                        self.ctx.check_merge_summaries(self.ai)
                     time.sleep(1)
                     continue
                 print(f"[LLM] Error: {e}")
@@ -261,6 +263,7 @@ class Orchestrator:
 
             with self.ctx_lock:
                 self.ctx.check_compact(self.ai)
+                self.ctx.check_merge_summaries(self.ai)
 
     def _execute_tool(self, name: str, args: dict) -> dict:
         if name == "take_photo":

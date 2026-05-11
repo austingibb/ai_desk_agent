@@ -1,4 +1,4 @@
-"""LLM API clients — DeepSeek on OpenRouter (brain) + local Gemma (vision/compaction)."""
+"""LLM API clients — DeepSeek on OpenRouter (brain) + local Gemma (vision)."""
 
 import json
 import re
@@ -16,10 +16,21 @@ from config import (
     LLM_MAX_TOKENS,
     LLM_MAX_TOKENS_COMPACT,
     LLM_TIMEOUT,
+    MERGE_SUMMARIES_TARGET,
+    TOKEN_ESTIMATE_DIVISOR,
 )
 
 # Gemma4 can leak control tokens like <|"|> into output
 _TOKEN_JUNK_RE = re.compile(r"<\|[\"']{1,3}\|?>")
+
+_PURPOSE = (
+    "Your real purpose is keeping Austin honest about the daily stuff — "
+    "getting up from the desk, drinking water, staying on track with studying "
+    "and applications instead of drifting. You're the small nudge in the moment, "
+    "the reminder of what he said he wanted, so the long-term goals actually get "
+    "there one day at a time. On the health habits that matter, you're firm — "
+    "you keep asking until he actually moves."
+)
 
 
 def _clean(text: str) -> str:
@@ -38,7 +49,6 @@ class AIClient:
         }
         if LLM_API_KEY:
             self._headers["Authorization"] = f"Bearer {LLM_API_KEY}"
-        self._vision = VisionClient()
 
     def chat_with_tools(self, messages: list, tools: list = None) -> dict:
         payload = {
@@ -87,11 +97,9 @@ class AIClient:
         }
 
     def compact(self, text: str) -> str:
-        """Summarize old context. Uses DeepSeek if API key is set, otherwise local Gemma."""
-        if not LLM_API_KEY:
-            return self._vision.compact(text)
+        """Summarize old context using DeepSeek."""
         messages = [
-            {"role": "user", "content": f"Summarize these observations and interactions concisely, preserving key events, decisions, and patterns. Pay attention to timestamps to understand the sequence and timing of events:\n\n{text}"}
+            {"role": "user", "content": f"{_PURPOSE} When summarizing, prioritize information that helps you fulfill this role.\n\nSummarize these observations and interactions concisely, preserving key events, decisions, and patterns. Pay attention to timestamps to understand the sequence and timing of events:\n\n{text}"}
         ]
         payload = {
             "model": self.model,
@@ -108,9 +116,53 @@ class AIClient:
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"].strip()
 
+    def merge_summaries(self, summaries_text: str) -> str:
+        """Merge/condense/drop context summaries using DeepSeek."""
+        prompt = (
+            f"You are reviewing a series of context summaries from an AI assistant's conversation history.\n"
+            f"Each summary was created at a different time and covers a different period.\n\n"
+            f"Your job is to REDUCE the number of summaries to at most {MERGE_SUMMARIES_TARGET} while preserving the most important information. You can:\n"
+            f"- MERGE related or adjacent summaries into one\n"
+            f"- CONDENSE summaries that are too detailed (e.g., drop repetitive photo/wait cycles)\n"
+            f"- DROP summaries that contain only routine monitoring with no meaningful events\n"
+            f"- KEEP important summaries as-is\n\n"
+            f"Remember your core purpose when deciding what to keep: {_PURPOSE}\n\n"
+            f"Prioritize preserving:\n"
+            f"- User preferences, corrections, and personality details\n"
+            f"- Key decisions and their reasons\n"
+            f"- Important events (notifications created, topics discussed, user habits learned)\n"
+            f"- Emotional/relationship moments\n"
+            f"- Anything that helps you fulfill your role as a regulation partner (patterns of behavior, triggers, what works)\n\n"
+            f"Deprioritize:\n"
+            f"- Repetitive photo descriptions of the same room\n"
+            f"- Routine wait/display/photo tool cycles\n"
+            f"- Redundant restatements of the same information across summaries\n\n"
+            f"Return a JSON array of objects. Each object has:\n"
+            f'- "time_range": the time period covered (e.g., "[Sat 14:33:40] \\u2013 [Sat 16:04:37]")\n'
+            f'- "summary": the summary text\n\n'
+            f"Return ONLY the JSON array, no other text.\n\n"
+            f"Here are the current summaries:\n\n"
+            f"{summaries_text}"
+        )
+        max_tokens = max(LLM_MAX_TOKENS_COMPACT, len(summaries_text) // TOKEN_ESTIMATE_DIVISOR)
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+            "temperature": 0.3,
+        }
+        resp = requests.post(
+            f"{self.base_url}/chat/completions",
+            headers=self._headers,
+            json=payload,
+            timeout=LLM_TIMEOUT,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"].strip()
+
 
 class VisionClient:
-    """Local Gemma on llama.cpp — vision descriptions and compaction."""
+    """Local Gemma on llama.cpp — vision descriptions."""
 
     def __init__(self):
         self.base_url = VISION_BASE_URL.rstrip("/")
@@ -167,23 +219,3 @@ class VisionClient:
                 return cleaned
             print(f"[VISION] Empty response (attempt {attempt + 1}/{max_retries}). Raw: {repr(raw[:200])}")
         return ""
-
-    def compact(self, text: str) -> str:
-        """Summarize old context using local Gemma (free)."""
-        messages = [
-            {"role": "user", "content": f"Summarize these observations and interactions concisely, preserving key events, decisions, and patterns. Pay attention to timestamps to understand the sequence and timing of events:\n\n{text}"}
-        ]
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "max_tokens": LLM_MAX_TOKENS_COMPACT,
-            "temperature": 0.3,
-        }
-        resp = requests.post(
-            f"{self.base_url}/chat/completions",
-            headers=self._headers,
-            json=payload,
-            timeout=LLM_TIMEOUT,
-        )
-        resp.raise_for_status()
-        return _clean(resp.json()["choices"][0]["message"]["content"])
