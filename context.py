@@ -339,6 +339,7 @@ class Context:
         non_summaries[insert_at:insert_at] = new_summaries
         self.messages = non_summaries
         print(f"[CONTEXT] Merged {len(summary_items)} summaries into {len(new_summaries)}")
+        self.save()
 
     @staticmethod
     def _parse_merge_result(text: str) -> list | None:
