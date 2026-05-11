@@ -549,7 +549,7 @@ class Orchestrator:
         seconds = args.get("seconds", 600)
         if not notif_id:
             return {"status": "error", "message": "No notification_id provided"}
-        seconds = max(60, min(7200, int(seconds)))
+        seconds = max(10, int(seconds))
         result = self.notification_store.schedule(notif_id, seconds)
         if result:
             print(f"[NOTIF] Scheduled {notif_id} to fire in {seconds}s")

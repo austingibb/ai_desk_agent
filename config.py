@@ -287,7 +287,7 @@ TOOL_DEFINITIONS = [
                     },
                     "seconds": {
                         "type": "integer",
-                        "description": "Seconds until next fire (60-7200). For recurring reminders, use the original interval (e.g. 1800 for 30min). To defer, use a shorter time.",
+                        "description": "Seconds until next fire (minimum 10). Use the original interval for recurring reminders, or a shorter time to defer.",
                     },
                 },
                 "required": ["notification_id", "seconds"],
