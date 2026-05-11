@@ -304,6 +304,7 @@ class Context:
             return
 
         summaries_text = "\n\n---\n\n".join(m["content"] for _, m in summary_items)
+        print(f"[CONTEXT] Merging {len(summary_items)} summaries ({len(summaries_text)} total chars)...")
 
         try:
             result = ai_client.merge_summaries(summaries_text)

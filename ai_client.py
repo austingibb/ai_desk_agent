@@ -118,6 +118,7 @@ class AIClient:
 
     def merge_summaries(self, summaries_text: str) -> str:
         """Merge/condense/drop context summaries using DeepSeek."""
+        print(f"[LLM] merge_summaries: {len(summaries_text)} chars input, targeting <= {MERGE_SUMMARIES_TARGET} summaries")
         prompt = (
             f"You are reviewing a series of context summaries from an AI assistant's conversation history.\n"
             f"Each summary was created at a different time and covers a different period.\n\n"
@@ -144,7 +145,8 @@ class AIClient:
             f"Here are the current summaries:\n\n"
             f"{summaries_text}"
         )
-        max_tokens = max(LLM_MAX_TOKENS_COMPACT, len(summaries_text) // TOKEN_ESTIMATE_DIVISOR)
+        max_tokens = min(8192, max(LLM_MAX_TOKENS_COMPACT, len(summaries_text) // TOKEN_ESTIMATE_DIVISOR))
+        print(f"[LLM] merge_summaries: prompt={len(prompt)} chars, max_tokens={max_tokens}, sending...")
         payload = {
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
@@ -158,7 +160,9 @@ class AIClient:
             timeout=LLM_TIMEOUT,
         )
         resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"].strip()
+        result = resp.json()["choices"][0]["message"]["content"].strip()
+        print(f"[LLM] merge_summaries: got {len(result)} chars response")
+        return result
 
 
 class VisionClient:
