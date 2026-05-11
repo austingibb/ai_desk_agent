@@ -145,7 +145,7 @@ class AIClient:
             f"Here are the current summaries:\n\n"
             f"{summaries_text}"
         )
-        max_tokens = min(8192, max(LLM_MAX_TOKENS_COMPACT, len(summaries_text) // TOKEN_ESTIMATE_DIVISOR))
+        max_tokens = max(LLM_MAX_TOKENS_COMPACT, len(summaries_text) // TOKEN_ESTIMATE_DIVISOR)
         print(f"[LLM] merge_summaries: prompt={len(prompt)} chars, max_tokens={max_tokens}, sending...")
         payload = {
             "model": self.model,
