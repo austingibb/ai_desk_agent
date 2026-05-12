@@ -145,8 +145,8 @@ class AIClient:
             f"Here are the current summaries:\n\n"
             f"{summaries_text}"
         )
-        max_tokens = max(LLM_MAX_TOKENS_COMPACT, len(summaries_text) // TOKEN_ESTIMATE_DIVISOR)
-        print(f"[LLM] merge_summaries: prompt={len(prompt)} chars, max_tokens={max_tokens}, sending...")
+        max_tokens = 8192  # DeepSeek max output
+        print(f"[LLM] merge_summaries: prompt={len(prompt)} chars, sending...")
         payload = {
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
@@ -160,7 +160,16 @@ class AIClient:
             timeout=LLM_TIMEOUT,
         )
         resp.raise_for_status()
-        result = resp.json()["choices"][0]["message"]["content"].strip()
+        data = resp.json()
+        choice = data["choices"][0]
+        finish = choice.get("finish_reason", "unknown")
+        content = choice["message"].get("content")
+        if not content:
+            print(f"[LLM] merge_summaries: empty content, finish_reason={finish}")
+            return ""
+        result = content.strip()
+        if finish == "length":
+            print(f"[LLM] merge_summaries: hit max_tokens ({max_tokens}) — result may be truncated")
         print(f"[LLM] merge_summaries: got {len(result)} chars response")
         return result
 
