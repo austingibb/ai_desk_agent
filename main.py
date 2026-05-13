@@ -271,6 +271,11 @@ class Orchestrator:
                 return {"error": "Camera is disabled. Use other tools instead."}
             play_sound("take_photo")
             return self._tool_take_photo()
+        elif name == "capture_photo":
+            if not ENABLE_CAMERA:
+                return {"error": "Camera is disabled. Use other tools instead."}
+            play_sound("take_photo")
+            return self._tool_capture_photo()
         elif name == "update_display":
             play_sound("update_display")
             return self._tool_update_display(args)
@@ -296,7 +301,7 @@ class Orchestrator:
                     return self.mcp.call_tool(name, args)
                 except Exception as e:
                     return {"error": f"MCP tool '{name}' failed: {e}"}
-            return {"error": f"Unknown tool: {name}. Available: take_photo, update_display, wait"}
+            return {"error": f"Unknown tool: {name}. Available: take_photo, capture_photo, update_display, wait"}
 
     def _tool_take_photo(self) -> dict:
         # Wait up to 90s for the background vision thread to produce a scene
@@ -316,6 +321,19 @@ class Orchestrator:
             "description": scene["description"],
             "captured_at": captured_at,
             "age_seconds": age,
+        }
+
+    def _tool_capture_photo(self) -> dict:
+        """Take a photo now and block until the vision model describes it."""
+        print("[PHOTO] Synchronous capture + describe (blocking, may take up to 120s)...")
+        scene = self._capture_and_describe()
+        if not scene:
+            return {"status": "error", "message": "Failed to capture or describe photo — vision model may be unavailable"}
+        captured_at = time.strftime("%-I:%M%p", time.localtime(scene["timestamp"])).lower().lstrip("0")
+        return {
+            "status": "ok",
+            "description": scene["description"],
+            "captured_at": captured_at,
         }
 
     def _tool_update_vision_requests(self, args: dict) -> dict:

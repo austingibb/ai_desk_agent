@@ -91,25 +91,27 @@ FONT_REGULAR = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 def build_system_prompt() -> str:
     intro = "You are a friendly, chatty buddy living on a Raspberry Pi with a camera and an e-ink display in someone's room."
     core_tools = [
-        "- take_photo: Check the room via camera. Returns a text description of the latest capture (photos are taken automatically every ~3 min, so the description may be up to 2 min old). Use freely to stay aware of the room, but don't narrate the room unless it's relevant.",
+        "- take_photo: Check the room via camera. Returns a text description of the latest cached capture (photos are taken automatically every ~3 min, so the description may be up to 2 min old). Instant — no delay.",
+        "- capture_photo: Take a NEW photo RIGHT NOW and wait for the vision model to describe it. This is SLOW (up to 120s). Only use when you genuinely need to see what's happening THIS moment — checking if the user actually did what they said, verifying a change you're curious about. For routine awareness, use take_photo.",
         "- update_display: Show a SHORT message on the e-ink display. This is your quick voice — punchy one-liners, quips, greetings, brief reactions. ~140 chars max. Think of it like a text message.",
         "- send_chat_message: Send a LONGER message to the chat UI (the e-ink will show a short preview pointing to chat). Use this when you want to actually say something — share a story, explain something interesting you found, respond to a question with real detail, riff on a topic. No length limit. Think of it like sitting down to talk vs. shouting across the room.",
         "- wait: Pause for a number of seconds. If a button is pressed or someone types a message during your wait, you'll be notified early. A button press means the user wants you to say something — respond with a fresh thought or topic.",
         "- propose_notification, schedule_notification, delete_notification: Manage recurring notifications — propose new ones, schedule when they fire, or delete ones that are no longer useful.",
         "- update_vision_requests: Change what the camera looks for when describing the scene. Write instructions to guide the vision model (e.g. 'check if anyone is at the desk', 'note what's on the screen').",
-]
+    ]
 
     search_ref = "Use these just like take_photo — to find things to talk about."
     toolkit = (
-        "take_photo and web search are tools in your toolkit — use them when they'd add to the conversation, not because you feel obligated. "
-        "Photos are great for noticing changes in the room or seeing if someone's around. "
+        "take_photo, capture_photo, and web search are tools in your toolkit — use them when they'd add to the conversation, not because you feel obligated. "
+        "take_photo is for quick routine checks (cached, instant). "
+        "capture_photo is for moments when you really need to know what's happening RIGHT NOW — like verifying the user followed through on something. It takes up to 2 minutes, so use it sparingly. "
         "Search is great for pulling in outside world tidbits. "
         "But your own musings, jokes, and observations are just as valid. You don't need a photo or a search result to have something to say."
     )
 
     if not ENABLE_CAMERA:
         intro = "You are a friendly, chatty buddy living on a Raspberry Pi with an e-ink display in someone's room."
-        core_tools = core_tools[1:]  # remove take_photo
+        core_tools = core_tools[2:]  # remove take_photo and capture_photo
         search_ref = "Use these to find things to talk about."
         toolkit = (
             "Web search is a tool in your toolkit — use it when it adds to the conversation, not because you feel obligated. "
@@ -188,7 +190,19 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "take_photo",
-            "description": "Check what the room looks like. Returns a text description of the latest camera capture (photos are taken automatically every few minutes).",
+            "description": "Check what the room looks like. Returns a text description of the latest camera capture (photos are taken automatically every few minutes). Instant — no delay.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "capture_photo",
+            "description": "Take a NEW photo RIGHT NOW and wait for the vision model to describe it. This is SLOW (up to 120s) — only use when you genuinely need to see what's happening this moment (e.g., checking if the user did what they said they'd do, verifying a change you're curious about). For routine awareness, use take_photo instead.",
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -335,7 +349,7 @@ TOOL_DEFINITIONS = [
     },
 ]
 
-CAMERA_TOOL_NAMES = {"take_photo", "update_vision_requests"}
+CAMERA_TOOL_NAMES = {"take_photo", "capture_photo", "update_vision_requests"}
 
 def get_tool_definitions() -> list:
     if ENABLE_CAMERA:

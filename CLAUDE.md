@@ -27,7 +27,7 @@ LLM Server (192.168.0.4:8081)
 - **DeepSeek (OpenRouter)** — the brain. Reasoning, tool calling, display decisions, notification management. Text-only.
 - **Local Gemma 4 (llama.cpp)** — vision-only. Background thread captures photos every 3 min, sends to Gemma for description, caches result.
 
-DeepSeek accesses the scene via a `take_photo` tool that returns the latest cached text description (instant, no round-trip to local LLM at call time). Compaction uses DeepSeek if API key is set, otherwise falls back to local Gemma.
+DeepSeek accesses the scene via a `take_photo` tool that returns the latest cached text description (instant, no round-trip to local LLM at call time). For moments when the AI genuinely needs to see what's happening right now, `capture_photo` takes a new photo and blocks until the vision model responds (up to 120s). Compaction uses DeepSeek if API key is set, otherwise falls back to local Gemma.
 
 ## Agent Loop (main.py Orchestrator._turn)
 
@@ -73,7 +73,8 @@ When DeepSeek calls `take_photo`, it gets the cached description instantly.
 ## Tools
 
 **Core tools** (defined in `config.py` TOOL_DEFINITIONS):
-- `take_photo` — returns cached text description from background vision thread
+- `take_photo` — returns cached text description from background vision thread (instant)
+- `capture_photo` — takes a new photo and blocks until the vision model describes it (up to 120s). Use sparingly — only for moments you genuinely need fresh info.
 - `update_display` — show message on e-ink (~140 chars max)
 - `wait` — pause with button/chat interruption polling
 - `propose_notification` — propose a recurring notification for user approval
@@ -82,7 +83,7 @@ When DeepSeek calls `take_photo`, it gets the cached description instantly.
 **MCP tools** (Brave Search, via `mcp_client.py`):
 - `brave_web_search`, `brave_local_search`, `brave_image_search`, `brave_video_search`, `brave_news_search`, `brave_summarizer`
 
-When `ENABLE_CAMERA=0`, `take_photo` and `update_vision_requests` are excluded from tools and system prompt.
+When `ENABLE_CAMERA=0`, `take_photo`, `capture_photo`, and `update_vision_requests` are excluded from tools and system prompt.
 
 ## Configuration
 
