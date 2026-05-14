@@ -740,8 +740,12 @@ button:hover{background:#c73e54}
 <form id="form"><input id="input" placeholder="Say something..." autocomplete="off"><button type="submit">Send</button></form>
 <script>
 const div=document.getElementById('messages');
-let renderedCount=0;
+const rendered=new Set();
 let initialized=false;
+
+function msgKey(m){
+  return m.role+'|'+m.time+'|'+m.content.slice(0,60);
+}
 
 function msgHTML(m){
   return `<div class="msg-wrap ${m.role}"><div class="role">${m.role}${m.time?' · '+m.time:''}</div><div class="msg">${m.content.replace(/</g,'&lt;')}</div></div>`;
@@ -755,19 +759,24 @@ async function refresh(){
   try{
     const r=await fetch('/chat');
     const msgs=await r.json();
-    if(!initialized || msgs.length<renderedCount){
+    if(!initialized){
       div.innerHTML=msgs.map(msgHTML).join('');
-      renderedCount=msgs.length;
+      msgs.forEach(m=>rendered.add(msgKey(m)));
       initialized=true;
       div.scrollTop=div.scrollHeight;
       return;
     }
-    if(msgs.length<=renderedCount)return;
     const wasAtBottom=atBottom();
-    const html=msgs.slice(renderedCount).map(msgHTML).join('');
-    div.insertAdjacentHTML('beforeend',html);
-    renderedCount=msgs.length;
-    if(wasAtBottom)div.scrollTop=div.scrollHeight;
+    let added=false;
+    for(const m of msgs){
+      const key=msgKey(m);
+      if(!rendered.has(key)){
+        div.insertAdjacentHTML('beforeend',msgHTML(m));
+        rendered.add(key);
+        added=true;
+      }
+    }
+    if(added&&wasAtBottom)div.scrollTop=div.scrollHeight;
   }catch(e){}
 }
 setInterval(refresh,2000);
@@ -780,8 +789,9 @@ document.getElementById('form').onsubmit=async e=>{
   inp.value='';
   const resp=await fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg})});
   if(resp.ok){
-    div.insertAdjacentHTML('beforeend',msgHTML({role:'user',content:msg,time:'now'}));
-    renderedCount++;
+    const entry={role:'user',content:msg,time:'now'};
+    div.insertAdjacentHTML('beforeend',msgHTML(entry));
+    rendered.add(msgKey(entry));
     div.scrollTop=div.scrollHeight;
     setTimeout(refresh,500);
   }
@@ -927,10 +937,18 @@ class ChatHandler(BaseHTTPRequestHandler):
         orch = ChatHandler.orchestrator
         with orch.ctx_lock:
             msgs = list(orch.ctx.messages)  # raw messages with _ts, no timestamp injection
-        # Include queued messages that haven't been drained to context yet
+        # Include queued messages that haven't been drained to context yet,
+        # but skip any that already appear in ctx (dedupe by content)
+        ctx_user_contents = set()
+        for m in msgs:
+            if m.get("role") == "user":
+                c = m.get("content", "")
+                if isinstance(c, str) and c.strip():
+                    ctx_user_contents.add(c.strip())
         with orch.chat_queue_lock:
             for qm in orch.chat_queue:
-                msgs.append({"role": "user", "content": qm, "_ts": time.time()})
+                if qm.strip() not in ctx_user_contents:
+                    msgs.append({"role": "user", "content": qm, "_ts": time.time()})
 
         filtered = []
         for m in msgs:
