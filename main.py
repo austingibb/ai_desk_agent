@@ -5,6 +5,7 @@ import time
 import signal
 import sys
 import json
+import secrets
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
@@ -19,6 +20,8 @@ from config import (
     IDLE_TIMEOUT,
     BUTTON_CHECK_INTERVAL,
     CHAT_SERVER_PORT,
+    CHAT_PASSWORD,
+    CHAT_SESSION_DAYS,
     REVIEW_INTERVAL,
     CATEGORY_COOLDOWN_REVIEWS,
     POLICY_REMINDER,
@@ -89,6 +92,11 @@ class Orchestrator:
         self.latest_scene = None  # {"description": str, "timestamp": float}
         self.scene_lock = threading.Lock()
         self.vision_requests_shown = False  # tracks if we've shown existing requests this turn
+
+        # Chat auth
+        self.session_token = secrets.token_hex(32)
+        print(f"[AUTH] Session token generated, password: {'***' if CHAT_PASSWORD != 'admin' else 'admin (default)'}")
+        print(f"[AUTH] Session lasts {CHAT_SESSION_DAYS} days")
 
         try:
             print("Init MCP client...")
@@ -675,6 +683,7 @@ class Orchestrator:
 
     def _start_chat_server(self):
         ChatHandler.orchestrator = self
+        ChatHandler.session_token = self.session_token
         server = HTTPServer(("0.0.0.0", CHAT_SERVER_PORT), ChatHandler)
         t = threading.Thread(target=server.serve_forever, daemon=True)
         t.start()
@@ -768,6 +777,32 @@ document.getElementById('form').onsubmit=async e=>{
 };
 </script></body></html>"""
 
+LOGIN_HTML = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI Friend — Login</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,sans-serif;background:#1a1a2e;color:#e0e0e0;height:100vh;display:flex;align-items:center;justify-content:center}
+form{background:#16213e;padding:32px;border-radius:12px;display:flex;flex-direction:column;gap:16px;width:320px;max-width:90vw}
+h1{font-size:20px;text-align:center}
+input{padding:12px;border:1px solid #0f3460;border-radius:8px;background:#1a1a2e;color:#e0e0e0;font-size:16px;outline:none}
+input:focus{border-color:#e94560}
+button{padding:12px;background:#e94560;color:#fff;border:none;border-radius:8px;font-size:16px;cursor:pointer}
+button:hover{background:#c73e54}
+.error{color:#e94560;font-size:14px;text-align:center;display:none}
+</style></head><body>
+<form id="form" method="post" action="/login">
+<h1>AI Friend</h1>
+<input type="password" id="password" name="password" placeholder="Password" autocomplete="current-password" autofocus>
+<button type="submit">Login</button>
+<div class="error" id="error">Wrong password</div>
+</form>
+<script>
+const params=new URLSearchParams(window.location.search);
+if(params.get('e')==='1')document.getElementById('error').style.display='block';
+</script>
+</body></html>"""
+
 NUDGE_PREFIXES = [
     "Some time has passed",
     "Display is updated. Continue the rhythm",
@@ -782,23 +817,90 @@ NUDGE_PREFIXES = [
 
 class ChatHandler(BaseHTTPRequestHandler):
     orchestrator = None
+    session_token = None
 
     def log_message(self, format, *args):
         pass  # suppress default access logs
 
+    def _get_cookie(self, name):
+        cookie_header = self.headers.get("Cookie", "")
+        for cookie in cookie_header.split(";"):
+            cookie = cookie.strip()
+            if "=" in cookie:
+                k, v = cookie.split("=", 1)
+                if k.strip() == name:
+                    return v.strip()
+        return None
+
+    def _check_auth(self):
+        return self._get_cookie("session") == self.session_token
+
+    def _require_auth(self):
+        if self._check_auth():
+            return True
+        if self.path == "/chat":
+            self.send_error(401)
+        else:
+            self._send_login()
+        return False
+
+    def _send_login(self):
+        data = LOGIN_HTML.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _set_auth_cookie(self):
+        max_age = CHAT_SESSION_DAYS * 86400
+        self.send_header("Set-Cookie", f"session={self.session_token}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax")
+
     def do_GET(self):
-        if self.path == "/":
+        if self.path.startswith("/login"):
+            self._send_login()
+        elif self.path == "/":
+            if not self._require_auth():
+                return
             self._serve_html()
         elif self.path == "/chat":
+            if not self._require_auth():
+                return
             self._get_messages()
         else:
             self.send_error(404)
 
     def do_POST(self):
-        if self.path == "/chat":
+        if self.path == "/login":
+            self._handle_login()
+        elif self.path == "/chat":
+            if not self._require_auth():
+                return
             self._post_message()
         else:
             self.send_error(404)
+
+    def _handle_login(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length).decode()
+        password = ""
+        for pair in body.split("&"):
+            if "=" in pair:
+                k, v = pair.split("=", 1)
+                if k == "password":
+                    from urllib.parse import unquote
+                    password = unquote(v.strip())
+        if password == CHAT_PASSWORD:
+            print("[AUTH] Login succeeded")
+            self.send_response(302)
+            self._set_auth_cookie()
+            self.send_header("Location", "/")
+            self.end_headers()
+        else:
+            print("[AUTH] Failed login attempt")
+            self.send_response(302)
+            self.send_header("Location", "/login?e=1")
+            self.end_headers()
 
     def _serve_html(self):
         data = CHAT_HTML.encode()
