@@ -720,15 +720,34 @@ button:hover{background:#c73e54}
 <form id="form"><input id="input" placeholder="Say something..." autocomplete="off"><button type="submit">Send</button></form>
 <script>
 const div=document.getElementById('messages');
-function render(msgs){
-  div.innerHTML=msgs.map(m=>`<div class="msg-wrap ${m.role}"><div class="role">${m.role}${m.time?' · '+m.time:''}</div><div class="msg">${m.content.replace(/</g,'&lt;')}</div></div>`).join('');
-  div.scrollTop=div.scrollHeight;
+let renderedCount=0;
+let initialized=false;
+
+function msgHTML(m){
+  return `<div class="msg-wrap ${m.role}"><div class="role">${m.role}${m.time?' · '+m.time:''}</div><div class="msg">${m.content.replace(/</g,'&lt;')}</div></div>`;
 }
+
+function atBottom(){
+  return div.scrollHeight-div.scrollTop-div.clientHeight<60;
+}
+
 async function refresh(){
   try{
     const r=await fetch('/chat');
     const msgs=await r.json();
-    render(msgs);
+    if(!initialized || msgs.length<renderedCount){
+      div.innerHTML=msgs.map(msgHTML).join('');
+      renderedCount=msgs.length;
+      initialized=true;
+      div.scrollTop=div.scrollHeight;
+      return;
+    }
+    if(msgs.length<=renderedCount)return;
+    const wasAtBottom=atBottom();
+    const html=msgs.slice(renderedCount).map(msgHTML).join('');
+    div.insertAdjacentHTML('beforeend',html);
+    renderedCount=msgs.length;
+    if(wasAtBottom)div.scrollTop=div.scrollHeight;
   }catch(e){}
 }
 setInterval(refresh,2000);
@@ -741,7 +760,8 @@ document.getElementById('form').onsubmit=async e=>{
   inp.value='';
   const resp=await fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg})});
   if(resp.ok){
-    div.insertAdjacentHTML('beforeend',`<div class="msg-wrap user"><div class="role">user · now</div><div class="msg">${msg.replace(/</g,'&lt;')}</div></div>`);
+    div.insertAdjacentHTML('beforeend',msgHTML({role:'user',content:msg,time:'now'}));
+    renderedCount++;
     div.scrollTop=div.scrollHeight;
     setTimeout(refresh,500);
   }
