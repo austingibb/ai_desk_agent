@@ -65,6 +65,9 @@ BUTTON_CHECK_INTERVAL = 1
 CHAT_SERVER_PORT = 8080
 CHAT_PASSWORD = os.environ.get("CHAT_PASSWORD", "admin")
 CHAT_SESSION_DAYS = 7
+CHAT_USE_HTTPS = os.environ.get("CHAT_USE_HTTPS", "0") == "1"
+SSL_CERT_FILE = os.environ.get("SSL_CERT_FILE", os.path.join(PROJECT_DIR, "cert.pem"))
+SSL_KEY_FILE = os.environ.get("SSL_KEY_FILE", os.path.join(PROJECT_DIR, "key.pem"))
 
 # Notifications
 REVIEW_INTERVAL = int(os.environ.get("REVIEW_INTERVAL", "1800"))  # 30 minutes

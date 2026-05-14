@@ -22,6 +22,9 @@ from config import (
     CHAT_SERVER_PORT,
     CHAT_PASSWORD,
     CHAT_SESSION_DAYS,
+    CHAT_USE_HTTPS,
+    SSL_CERT_FILE,
+    SSL_KEY_FILE,
     REVIEW_INTERVAL,
     CATEGORY_COOLDOWN_REVIEWS,
     POLICY_REMINDER,
@@ -684,10 +687,18 @@ class Orchestrator:
     def _start_chat_server(self):
         ChatHandler.orchestrator = self
         ChatHandler.session_token = self.session_token
+        ChatHandler.use_https = CHAT_USE_HTTPS
         server = HTTPServer(("0.0.0.0", CHAT_SERVER_PORT), ChatHandler)
+        if CHAT_USE_HTTPS:
+            import ssl
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(SSL_CERT_FILE, SSL_KEY_FILE)
+            server.socket = ctx.wrap_socket(server.socket, server_side=True)
+            print(f"[CHAT] HTTPS server listening on :{CHAT_SERVER_PORT}")
+        else:
+            print(f"[CHAT] Server listening on :{CHAT_SERVER_PORT}")
         t = threading.Thread(target=server.serve_forever, daemon=True)
         t.start()
-        print(f"[CHAT] Server listening on :{CHAT_SERVER_PORT}")
 
     def cleanup(self):
         print("Cleaning up...")
@@ -818,6 +829,7 @@ NUDGE_PREFIXES = [
 class ChatHandler(BaseHTTPRequestHandler):
     orchestrator = None
     session_token = None
+    use_https = False
 
     def log_message(self, format, *args):
         pass  # suppress default access logs
@@ -854,7 +866,8 @@ class ChatHandler(BaseHTTPRequestHandler):
 
     def _set_auth_cookie(self):
         max_age = CHAT_SESSION_DAYS * 86400
-        self.send_header("Set-Cookie", f"session={self.session_token}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax")
+        secure = "; Secure" if self.use_https else ""
+        self.send_header("Set-Cookie", f"session={self.session_token}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax{secure}")
 
     def do_GET(self):
         if self.path.startswith("/login"):
