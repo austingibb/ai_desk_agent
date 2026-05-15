@@ -1,8 +1,8 @@
 # AI E-Ink Assistant
 
-An autonomous AI assistant running on two Raspberry Pis — it watches the room, shares thoughts on an e-ink display, and chats with you. Uses DeepSeek on OpenRouter as the brain and local Gemma 4 for vision.
+This is an independent AI assistant powered by two Raspberry Pis. It observes the room, reflects on the screen, and talks to you. The advanced model on OpenRouter is powering the mind, while the local Gemma 4 is handling the visual perception.
 
-The real purpose: keeping you honest about the daily stuff — getting up from the desk, drinking water, staying on track with studying and applications instead of drifting. It's the small nudge in the moment, the reminder of what you said you wanted, so the long-term goals actually get there one day at a time.
+But that's just the tip of the iceberg. The true objective here is ensuring that you stick to your promises when it comes to the everyday things: taking breaks from the desk, hydrating yourself, studying, and doing chores instead of procrastinating. It's the little push that makes sure the larger goals come through eventually.
 
 ## Hardware
 
