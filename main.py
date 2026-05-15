@@ -42,16 +42,8 @@ from camera import Camera
 from ai_client import AIClient, VisionClient
 from mcp_client import MCPClient
 from sounds import play as play_sound
-
-LOG_FILE = "/home/austingibb/ai_eink/verbose.log"
-
-
-def log(msg: str):
-    try:
-        with open(LOG_FILE, "a") as f:
-            f.write(msg + "\n")
-    except Exception:
-        pass
+import logger
+from logger import info
 
 
 def http_get(path: str, timeout: int = 5) -> dict:
@@ -60,7 +52,7 @@ def http_get(path: str, timeout: int = 5) -> dict:
         if r.status_code == 200:
             return r.json()
     except Exception as e:
-        print(f"[HTTP GET] {path}: {e}")
+        info(f"[HTTP GET] {path}: {e}")
     return {}
 
 
@@ -69,16 +61,16 @@ def http_post(path: str, data: dict, timeout: int = 5):
         r = requests.post(f"{DISPLAY_SERVER_URL}{path}", json=data, timeout=timeout)
         return r.status_code == 200
     except Exception as e:
-        print(f"[HTTP POST] {path}: {e}")
+        info(f"[HTTP POST] {path}: {e}")
     return False
 
 
 class Orchestrator:
     def __init__(self):
         self.ctx = Context()
-        self.camera = Camera()
+        self.camera = Camera() if ENABLE_CAMERA else None
         self.ai = AIClient()
-        self.vision = VisionClient()
+        self.vision = VisionClient() if ENABLE_CAMERA else None
         self.running = True
         self.last_display_time = 0
         self.chat_event = threading.Event()
@@ -106,50 +98,50 @@ class Orchestrator:
                 with open(self._token_file, "r") as f:
                     self.session_token = f.read().strip()
                 if self.session_token:
-                    print(f"[AUTH] Loaded existing session token")
+                    info(f"[AUTH] Loaded existing session token")
             except Exception:
                 self.session_token = ""
         if not self.session_token:
             self.session_token = secrets.token_hex(32)
             with open(self._token_file, "w") as f:
                 f.write(self.session_token)
-            print(f"[AUTH] Generated new session token")
-        print(f"[AUTH] Password: {'***' if CHAT_PASSWORD != 'admin' else 'admin (default)'}, session lasts {CHAT_SESSION_DAYS} days")
+            info(f"[AUTH] Generated new session token")
+        info(f"[AUTH] Password: {'***' if CHAT_PASSWORD != 'admin' else 'admin (default)'}, session lasts {CHAT_SESSION_DAYS} days")
 
         try:
-            print("Init MCP client...")
+            info("Init MCP client...")
             self.mcp = MCPClient()
             tools = self.mcp.initialize()
             self.mcp_tools = self.mcp.get_tool_definitions()
-            print(f"[MCP] Discovered {len(tools)} tools: {[t['name'] for t in tools]}")
+            info(f"[MCP] Discovered {len(tools)} tools: {[t['name'] for t in tools]}")
         except Exception as e:
-            print(f"[MCP] Unavailable: {e}")
+            info(f"[MCP] Unavailable: {e}")
 
         signal.signal(signal.SIGINT, self._handle_signal)
         signal.signal(signal.SIGTERM, self._handle_signal)
 
     def _handle_signal(self, signum, frame):
-        print("\nShutting down...")
+        info("\nShutting down...")
         self.running = False
 
     def run(self):
-        print("Init camera...")
-        print("Init AI client (DeepSeek on OpenRouter)...")
-        print("Init vision client (local Gemma)...")
+        info("Init camera...")
+        info("Init AI client (DeepSeek on OpenRouter)...")
+        info("Init vision client (local Gemma)...")
         self._start_chat_server()
         if ENABLE_CAMERA:
             self._start_vision_loop()
         with self.ctx_lock:
             if self.ctx.load():
-                print("Resuming from saved context.")
+                info("Resuming from saved context.")
                 # Always refresh system prompt to pick up changes
                 prompt = build_system_prompt()
                 if self.ctx.messages and self.ctx.messages[0].get("role") == "system":
                     self.ctx.messages[0]["content"] = prompt
-                    print("[CONTEXT] Refreshed system prompt in loaded context.")
+                    info("[CONTEXT] Refreshed system prompt in loaded context.")
                 else:
                     self.ctx.messages.insert(0, {"role": "system", "content": prompt, "_ts": self.ctx._now()})
-                    print("[CONTEXT] Inserted system prompt into loaded context.")
+                    info("[CONTEXT] Inserted system prompt into loaded context.")
                 if ENABLE_CAMERA:
                     self.ctx.add_user("You just woke back up after a restart! Use take_photo to see the room and pick up where you left off.")
                 else:
@@ -160,13 +152,13 @@ class Orchestrator:
                     self.ctx.add_user("You just woke up! Use take_photo to see the room and say hi.")
                 else:
                     self.ctx.add_user("You just woke up! Note: camera/vision tools are not available. Use your other tools to say hi.")
-        print("Entering agent loop.")
+        info("Entering agent loop.")
 
         while self.running:
             try:
                 self._turn()
             except Exception as e:
-                print(f"[ERROR] {e}")
+                info(f"[ERROR] {e}")
                 time.sleep(5)
 
         self.cleanup()
@@ -197,7 +189,7 @@ class Orchestrator:
             messages.append({"role": "user", "content": POLICY_REMINDER})
             estimated = msg_tokens + estimate_tool_tokens(tools) + len(POLICY_REMINDER) // 4
             if estimated > LLM_ESTIMATED_MAX_TOKENS:
-                print(f"[LLM] Token estimate {estimated} exceeds limit {LLM_ESTIMATED_MAX_TOKENS}, compacting...")
+                info(f"[LLM] Token estimate {estimated} exceeds limit {LLM_ESTIMATED_MAX_TOKENS}, compacting...")
                 with self.ctx_lock:
                     self.ctx.check_compact(self.ai)
                     self.ctx.check_merge_summaries(self.ai)
@@ -206,21 +198,21 @@ class Orchestrator:
                     msg_tokens = self.ctx.total_tokens()
                 messages.append({"role": "user", "content": POLICY_REMINDER})
                 estimated = msg_tokens + estimate_tool_tokens(tools) + len(POLICY_REMINDER) // 4
-                print(f"[LLM] After compaction: ~{msg_tokens} msg tokens + {estimate_tool_tokens(tools)} tool tokens = ~{estimated} total")
-            print(f"[LLM] Sending {len(messages)} messages (~{msg_tokens} msg tokens, ~{estimate_tool_tokens(tools)} tool tokens, ~{estimated} total)...")
+                info(f"[LLM] After compaction: ~{msg_tokens} msg tokens + {estimate_tool_tokens(tools)} tool tokens = ~{estimated} total")
+            info(f"[LLM] Sending {len(messages)} messages (~{msg_tokens} msg tokens, ~{estimate_tool_tokens(tools)} tool tokens, ~{estimated} total)...")
             play_sound("thinking")
             try:
                 response = self.ai.chat_with_tools(messages, tools)
             except Exception as e:
                 err_str = str(e)
                 if "exceed_context_size_error" in err_str or "exceeds the available context size" in err_str:
-                    print(f"[LLM] Context overflow detected, triggering compaction...")
+                    info(f"[LLM] Context overflow detected, triggering compaction...")
                     with self.ctx_lock:
                         self.ctx.check_compact(self.ai)
                         self.ctx.check_merge_summaries(self.ai)
                     time.sleep(1)
                     continue
-                print(f"[LLM] Error: {e}")
+                info(f"[LLM] Error: {e}")
                 with self.ctx_lock:
                     self.ctx.add_user("Something went wrong. Continue the rhythm — what's your next action?")
                 time.sleep(5)
@@ -230,32 +222,32 @@ class Orchestrator:
                 self.ctx.add_assistant(response)
 
             if response["reasoning"]:
-                print(f"[REASONING] {response['reasoning'][:200]}...")
-                log(f"[REASONING] {response['reasoning']}")
+                info(f"[REASONING] {response['reasoning'][:200]}...")
+                info(f"[REASONING] {response['reasoning']}")
             if response["content"]:
-                print(f"[AI] {response['content'][:200]}")
-                log(f"[AI] {response['content']}")
+                info(f"[AI] {response['content'][:200]}")
+                info(f"[AI] {response['content']}")
 
             if not response["tool_calls"]:
                 # If DeepSeek returned text but no tool call, display it automatically
                 if response["content"]:
                     content = response["content"]
                     if len(content) > 140:
-                        print(f"[AUTO-CHAT] AI returned long content without tool call, sending to chat...")
+                        info(f"[AUTO-CHAT] AI returned long content without tool call, sending to chat...")
                         result = self._tool_send_chat_message({"text": content})
                     else:
-                        print(f"[AUTO-DISPLAY] AI returned content without update_display, showing it...")
+                        info(f"[AUTO-DISPLAY] AI returned content without update_display, showing it...")
                         result = self._tool_update_display({"text": content})
                     if result.get("status") == "ok":
                         self._tool_wait({})
                     continue
                 if tool_call_count > 0 and not nudged:
-                    print("[PROMPT] No tool call after tool execution, nudging LLM to continue rhythm...")
+                    info("[PROMPT] No tool call after tool execution, nudging LLM to continue rhythm...")
                     with self.ctx_lock:
                         self.ctx.add_user("Continue the rhythm — what's your next action?")
                     nudged = True
                     continue
-                print("[IDLE] AI produced no tool calls. Waiting...")
+                info("[IDLE] AI produced no tool calls. Waiting...")
                 self._idle_wait()
                 return
 
@@ -267,14 +259,14 @@ class Orchestrator:
             for tc in response["tool_calls"]:
                 tool_call_count += 1
                 last_tool_name = tc["name"]
-                print(f"[TOOL] {tc['name']}({tc['arguments']})")
+                info(f"[TOOL] {tc['name']}({tc['arguments']})")
                 try:
                     result = self._execute_tool(tc["name"], tc["arguments"])
                 except Exception as e:
                     result = {"status": "error", "message": f"Tool execution failed: {e}"}
-                    print(f"[TOOL ERROR] {e}")
-                print(f"[TOOL RESULT] {json.dumps(result)[:200]}")
-                log(f"[TOOL RESULT] {json.dumps(result)}")
+                    info(f"[TOOL ERROR] {e}")
+                info(f"[TOOL RESULT] {json.dumps(result)[:200]}")
+                info(f"[TOOL RESULT] {json.dumps(result)}")
                 with self.ctx_lock:
                     self.ctx.add_tool_result(tc["id"], tc["name"], result)
                 user_msg = result.get("user_message")
@@ -351,7 +343,7 @@ class Orchestrator:
 
     def _tool_capture_photo(self) -> dict:
         """Take a photo now and block until the vision model describes it."""
-        print("[PHOTO] Synchronous capture + describe (blocking, may take up to 120s)...")
+        info("[PHOTO] Synchronous capture + describe (blocking, may take up to 120s)...")
         scene = self._capture_and_describe()
         if not scene:
             return {"status": "error", "message": "Failed to capture or describe photo — vision model may be unavailable"}
@@ -378,7 +370,7 @@ class Orchestrator:
         # First call with existing content: bounce back so the AI can merge
         if current and not self.vision_requests_shown:
             self.vision_requests_shown = True
-            print(f"[VISION] Bouncing update_vision_requests — showing existing requests first")
+            info(f"[VISION] Bouncing update_vision_requests — showing existing requests first")
             return {
                 "status": "needs_retry",
                 "message": (
@@ -394,7 +386,7 @@ class Orchestrator:
             with open(VISION_REQUESTS_FILE, "w") as f:
                 f.write(f"# Requests for Image Model\n\n{requests_text}\n")
             self.vision_requests_shown = False  # reset so next update bounces again
-            print(f"[VISION] Requests updated: {requests_text[:100]}...")
+            info(f"[VISION] Requests updated: {requests_text[:100]}...")
             return {"status": "ok", "message": "Vision requests updated. Changes take effect on the next photo capture."}
         except Exception as e:
             return {"status": "error", "message": f"Failed to write requests file: {e}"}
@@ -404,7 +396,7 @@ class Orchestrator:
         try:
             jpeg_bytes, photo_uri = self.camera.capture()
         except Exception as e:
-            print(f"[VISION] Camera error: {e}")
+            info(f"[VISION] Camera error: {e}")
             return None
 
         self._save_debug_image(jpeg_bytes)
@@ -412,10 +404,10 @@ class Orchestrator:
         try:
             description = self.vision.describe(photo_uri)
         except Exception as e:
-            print(f"[VISION] Describe error: {e}")
+            info(f"[VISION] Describe error: {e}")
             return None
         if not description:
-            print("[VISION] Got empty description from vision model, skipping")
+            info("[VISION] Got empty description from vision model, skipping")
             return None
         scene = {"description": description, "timestamp": time.time()}
         with self.scene_lock:
@@ -433,7 +425,7 @@ class Orchestrator:
             with open(_os.path.join(debug_dir, filename), "wb") as f:
                 f.write(jpeg_bytes)
         except Exception as e:
-            print(f"[VISION] Failed to save debug image: {e}")
+            info(f"[VISION] Failed to save debug image: {e}")
             return
         cutoff = time.time() - 86400
         for old in _glob.glob(_os.path.join(debug_dir, "*.jpg")):
@@ -445,18 +437,18 @@ class Orchestrator:
 
     def _start_vision_loop(self):
         def loop():
-            print(f"[VISION] Background thread started (interval={VISION_POLL_INTERVAL}s)")
+            info(f"[VISION] Background thread started (interval={VISION_POLL_INTERVAL}s)")
             while self.running:
                 scene = self._capture_and_describe()
                 if scene:
-                    print(f"[VISION] Scene updated: {scene['description'][:100]}...")
+                    info(f"[VISION] Scene updated: {scene['description'][:100]}...")
                 else:
-                    print("[VISION] Failed to capture/describe, will retry next interval")
+                    info("[VISION] Failed to capture/describe, will retry next interval")
                 for _ in range(VISION_POLL_INTERVAL):
                     if not self.running:
                         return
                     time.sleep(1)
-            print("[VISION] Background thread stopped")
+            info("[VISION] Background thread stopped")
 
         t = threading.Thread(target=loop, daemon=True)
         t.start()
@@ -500,14 +492,14 @@ class Orchestrator:
 
     def _tool_wait(self, args: dict) -> dict:
         seconds = max(MIN_WAIT_SECONDS, min(MAX_WAIT_SECONDS, int(args.get("seconds", 60))))
-        print(f"[WAIT] Sleeping {seconds}s...")
+        info(f"[WAIT] Sleeping {seconds}s...")
 
         start = time.monotonic()
         while time.monotonic() - start < seconds:
             if self.chat_event.is_set():
                 self.chat_event.clear()
                 waited = int(time.monotonic() - start)
-                print(f"[WAIT] Interrupted by chat message after {waited}s")
+                info(f"[WAIT] Interrupted by chat message after {waited}s")
                 return {"status": "interrupted", "reason": "chat_message", "waited": waited}
 
             if not self.running:
@@ -523,7 +515,7 @@ class Orchestrator:
                 )
                 self.last_review_time = time.time()
                 waited = int(time.monotonic() - start)
-                print(f"[WAIT] Interrupted by notification review after {waited}s")
+                info(f"[WAIT] Interrupted by notification review after {waited}s")
                 return {"status": "interrupted", "reason": "notification_review", "waited": waited, "user_message": summary}
 
             due = self.notification_store.get_due_notification()
@@ -533,7 +525,7 @@ class Orchestrator:
                 self.notification_store.record_firing(due["id"])
                 self.last_fired_notification_id = due["id"]
                 waited = int(time.monotonic() - start)
-                print(f"[NOTIF] Due notification fired: {due['id']}")
+                info(f"[NOTIF] Due notification fired: {due['id']}")
                 return {"status": "interrupted", "reason": "notification_due", "waited": waited, "user_message": f'[Notification] id={due["id"]} — Time to show: "{due["message"]}"\nAfter showing it (or deferring), call schedule_notification with this ID to set when it fires next.'}
 
             result = http_get("/buttons/state", timeout=2)
@@ -543,7 +535,7 @@ class Orchestrator:
 
                 if self.notification_store.has_pending_proposal():
                     approved = self.notification_store.approve_pending()
-                    print(f"[NOTIF] Proposal approved: {approved['id']}")
+                    info(f"[NOTIF] Proposal approved: {approved['id']}")
                     user_msg = f'The user approved your notification: "{approved["message"]}"'
                 else:
                     if self.last_fired_notification_id:
@@ -551,7 +543,7 @@ class Orchestrator:
                         self.last_fired_notification_id = None
                     user_msg = "The user pressed a button — they want you to say something!"
 
-                print(f"[WAIT] Interrupted by button press after {waited}s")
+                info(f"[WAIT] Interrupted by button press after {waited}s")
                 return {
                     "status": "interrupted",
                     "reason": f"Button {result['button']} pressed — injected nudge",
@@ -561,7 +553,7 @@ class Orchestrator:
                 }
             time.sleep(BUTTON_CHECK_INTERVAL)
 
-        print(f"[WAIT] Completed {seconds}s.")
+        info(f"[WAIT] Completed {seconds}s.")
         return {"status": "ok", "waited": seconds}
 
     def _tool_propose_notification(self, args: dict) -> dict:
@@ -585,7 +577,7 @@ class Orchestrator:
             message, category, trigger_type, trigger_value
         )
         self.proposal_category_cooldowns[category] = CATEGORY_COOLDOWN_REVIEWS
-        print(f"[NOTIF] Proposal created: {notif['id']} — \"{message}\"")
+        info(f"[NOTIF] Proposal created: {notif['id']} — \"{message}\"")
         return {
             "status": "ok",
             "message": f"Proposal saved. Now show it to the user with update_display: '{message} — press button to approve!'",
@@ -599,7 +591,7 @@ class Orchestrator:
         seconds = max(10, int(seconds))
         result = self.notification_store.schedule(notif_id, seconds)
         if result:
-            print(f"[NOTIF] Scheduled {notif_id} to fire in {seconds}s")
+            info(f"[NOTIF] Scheduled {notif_id} to fire in {seconds}s")
             return {"status": "ok", "message": f"Scheduled to fire again in {seconds}s ({seconds//60}min)."}
         return {"status": "error", "message": f"Notification {notif_id} not found"}
 
@@ -608,7 +600,7 @@ class Orchestrator:
         if not notif_id:
             return {"status": "error", "message": "No notification_id provided"}
         self.notification_store.delete(notif_id)
-        print(f"[NOTIF] Deleted {notif_id}")
+        info(f"[NOTIF] Deleted {notif_id}")
         return {"status": "ok", "message": f"Notification {notif_id} deleted."}
 
     def _detect_patterns(self) -> str | None:
@@ -678,7 +670,7 @@ class Orchestrator:
                         self.ctx.add_user(
                             f'The user approved your notification: "{approved["message"]}"'
                         )
-                    print(f"[NOTIF] Proposal approved in idle: {approved['id']}")
+                    info(f"[NOTIF] Proposal approved in idle: {approved['id']}")
                 else:
                     if self.last_fired_notification_id:
                         self.notification_store.record_acknowledgment(self.last_fired_notification_id)
@@ -686,7 +678,7 @@ class Orchestrator:
                     with self.ctx_lock:
                         self.ctx.add_user("The user pressed a button — they want you to say something!")
 
-                print("[IDLE] Interrupted by button press")
+                info("[IDLE] Interrupted by button press")
                 return
             time.sleep(1)
         with self.ctx_lock:
@@ -709,14 +701,14 @@ class Orchestrator:
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             ctx.load_cert_chain(SSL_CERT_FILE, SSL_KEY_FILE)
             server.socket = ctx.wrap_socket(server.socket, server_side=True)
-            print(f"[CHAT] HTTPS server listening on :{CHAT_SERVER_PORT}")
+            info(f"[CHAT] HTTPS server listening on :{CHAT_SERVER_PORT}")
         else:
-            print(f"[CHAT] Server listening on :{CHAT_SERVER_PORT}")
+            info(f"[CHAT] Server listening on :{CHAT_SERVER_PORT}")
         t = threading.Thread(target=server.serve_forever, daemon=True)
         t.start()
 
     def cleanup(self):
-        print("Cleaning up...")
+        info("Cleaning up...")
         with self.ctx_lock:
             self.ctx.save()
         try:
@@ -724,10 +716,11 @@ class Orchestrator:
         except Exception:
             pass
         try:
-            self.camera.close()
+            if self.camera:
+                self.camera.close()
         except Exception:
             pass
-        print("Done.")
+        info("Done.")
 
 
 CHAT_HTML = """<!DOCTYPE html>
@@ -925,13 +918,13 @@ class ChatHandler(BaseHTTPRequestHandler):
                     from urllib.parse import unquote
                     password = unquote(v.strip())
         if password == CHAT_PASSWORD:
-            print("[AUTH] Login succeeded")
+            info("[AUTH] Login succeeded")
             self.send_response(302)
             self._set_auth_cookie()
             self.send_header("Location", "/")
             self.end_headers()
         else:
-            print("[AUTH] Failed login attempt")
+            info("[AUTH] Failed login attempt")
             self.send_response(302)
             self.send_header("Location", "/login?e=1")
             self.end_headers()
@@ -1016,7 +1009,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 rejected = orch.notification_store.reject_pending()
                 if rejected:
                     orch.last_fired_notification_id = None
-                    print(f"[NOTIF] Proposal rejected via chat: {rejected['id']}")
+                    info(f"[NOTIF] Proposal rejected via chat: {rejected['id']}")
 
         if orch.last_fired_notification_id:
             orch.notification_store.record_acknowledgment(orch.last_fired_notification_id)
@@ -1025,7 +1018,7 @@ class ChatHandler(BaseHTTPRequestHandler):
         with orch.chat_queue_lock:
             orch.chat_queue.append(message)
         orch.chat_event.set()
-        print(f"[CHAT] User message: {message[:100]}")
+        info(f"[CHAT] User message: {message[:100]}")
 
         data = json.dumps({"status": "ok"}).encode()
         self.send_response(200)
@@ -1036,6 +1029,7 @@ class ChatHandler(BaseHTTPRequestHandler):
 
 
 def main():
+    logger.VERBOSE_LOG = "/home/austingibb/ai_eink/verbose.log"
     orch = Orchestrator()
     try:
         orch.run()

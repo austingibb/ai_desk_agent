@@ -5,6 +5,7 @@ import os
 import re
 import time as _time
 from config import COMPACT_AFTER_N_MESSAGES, KEEP_LAST_N_MESSAGES, PROJECT_DIR, TOKEN_ESTIMATE_DIVISOR, MERGE_SUMMARIES_AFTER
+from logger import info
 
 CONTEXT_FILE = os.path.join(PROJECT_DIR, "context.json")
 
@@ -27,9 +28,9 @@ class Context:
         try:
             with open(CONTEXT_FILE, "w") as f:
                 json.dump(to_save, f)
-            print(f"[CONTEXT] Saved {len(to_save)} messages to {CONTEXT_FILE}")
+            info(f"[CONTEXT] Saved {len(to_save)} messages to {CONTEXT_FILE}")
         except Exception as e:
-            print(f"[CONTEXT] Save error: {e}")
+            info(f"[CONTEXT] Save error: {e}")
 
     def load(self) -> bool:
         """Load messages from disk. Returns True if loaded successfully."""
@@ -43,10 +44,10 @@ class Context:
                 if "_ts" not in m:
                     m["_ts"] = now
             repaired = self._repair_pairing()
-            print(f"[CONTEXT] Loaded {len(self.messages)} messages from {CONTEXT_FILE}")
+            info(f"[CONTEXT] Loaded {len(self.messages)} messages from {CONTEXT_FILE}")
             return True
         except Exception as e:
-            print(f"[CONTEXT] Load error: {e}")
+            info(f"[CONTEXT] Load error: {e}")
             return False
 
     def _repair_pairing(self) -> int:
@@ -110,7 +111,7 @@ class Context:
 
         if repairs:
             self.messages = cleaned
-            print(f"[CONTEXT] Repaired {repairs} pairing violations, saving...")
+            info(f"[CONTEXT] Repaired {repairs} pairing violations, saving...")
             self.save()
         return repairs
 
@@ -429,7 +430,7 @@ class Context:
         })
         new_messages.extend(self.messages[end:])
         self.messages = new_messages
-        print(f"[CONTEXT] Compacted {len(to_compact)} messages into 1 summary (~{len(summary)} chars) [{date_label}], "
+        info(f"[CONTEXT] Compacted {len(to_compact)} messages into 1 summary (~{len(summary)} chars) [{date_label}], "
               f"preserved {len(existing_summaries)} prior summaries, keeping last {keep_count}")
 
     def check_merge_summaries(self, ai_client):
@@ -439,20 +440,20 @@ class Context:
             return
 
         summaries_text = "\n\n---\n\n".join(m["content"] for _, m in summary_items)
-        print(f"[CONTEXT] Merging {len(summary_items)} summaries ({len(summaries_text)} total chars)...")
+        info(f"[CONTEXT] Merging {len(summary_items)} summaries ({len(summaries_text)} total chars)...")
 
         try:
             result = ai_client.merge_summaries(summaries_text)
         except Exception as e:
-            print(f"[CONTEXT] Summary merge error: {e}")
+            info(f"[CONTEXT] Summary merge error: {e}")
             return
 
         merged = self._parse_merge_result(result)
         if merged is None:
-            print(f"[CONTEXT] Summary merge produced unparseable output, skipping. Raw: {result[:200]}")
+            info(f"[CONTEXT] Summary merge produced unparseable output, skipping. Raw: {result[:200]}")
             return
         if len(merged) >= len(summary_items):
-            print(f"[CONTEXT] Summary merge produced {len(merged)} summaries (was {len(summary_items)}), skipping — not an improvement")
+            info(f"[CONTEXT] Summary merge produced {len(merged)} summaries (was {len(summary_items)}), skipping — not an improvement")
             return
 
         new_summaries = []
@@ -466,14 +467,14 @@ class Context:
             })
 
         if not new_summaries or len(new_summaries) >= len(summary_items):
-            print(f"[CONTEXT] Summary merge result invalid ({len(new_summaries)} valid summaries), skipping")
+            info(f"[CONTEXT] Summary merge result invalid ({len(new_summaries)} valid summaries), skipping")
             return
 
         non_summaries = [m for m in self.messages if not self._is_summary(m)]
         insert_at = 1 if non_summaries and non_summaries[0].get("role") == "system" else 0
         non_summaries[insert_at:insert_at] = new_summaries
         self.messages = non_summaries
-        print(f"[CONTEXT] Merged {len(summary_items)} summaries into {len(new_summaries)}")
+        info(f"[CONTEXT] Merged {len(summary_items)} summaries into {len(new_summaries)}")
         self.save()
 
     @staticmethod

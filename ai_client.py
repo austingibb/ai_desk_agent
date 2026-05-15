@@ -3,6 +3,7 @@
 import json
 import re
 import requests
+from logger import info
 from config import (
     LLM_BASE_URL,
     LLM_API_KEY,
@@ -68,7 +69,7 @@ class AIClient:
         )
         if not resp.ok:
             body = resp.text[:500]
-            print(f"[LLM] {resp.status_code} error: {body}")
+            info(f"[LLM] {resp.status_code} error: {body}")
             resp.raise_for_status()
         data = resp.json()
         choice = data["choices"][0]
@@ -118,7 +119,7 @@ class AIClient:
 
     def merge_summaries(self, summaries_text: str) -> str:
         """Merge/condense/drop context summaries using DeepSeek."""
-        print(f"[LLM] merge_summaries: {len(summaries_text)} chars input, targeting <= {MERGE_SUMMARIES_TARGET} summaries")
+        info(f"[LLM] merge_summaries: {len(summaries_text)} chars input, targeting <= {MERGE_SUMMARIES_TARGET} summaries")
         prompt = (
             f"You are reviewing a series of context summaries from an AI assistant's conversation history.\n"
             f"Each summary was created at a different time and covers a different period.\n\n"
@@ -146,7 +147,7 @@ class AIClient:
             f"{summaries_text}"
         )
         max_tokens = 8192  # DeepSeek max output
-        print(f"[LLM] merge_summaries: prompt={len(prompt)} chars, sending...")
+        info(f"[LLM] merge_summaries: prompt={len(prompt)} chars, sending...")
         payload = {
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
@@ -165,12 +166,12 @@ class AIClient:
         finish = choice.get("finish_reason", "unknown")
         content = choice["message"].get("content")
         if not content:
-            print(f"[LLM] merge_summaries: empty content, finish_reason={finish}")
+            info(f"[LLM] merge_summaries: empty content, finish_reason={finish}")
             return ""
         result = content.strip()
         if finish == "length":
-            print(f"[LLM] merge_summaries: hit max_tokens ({max_tokens}) — result may be truncated")
-        print(f"[LLM] merge_summaries: got {len(result)} chars response")
+            info(f"[LLM] merge_summaries: hit max_tokens ({max_tokens}) — result may be truncated")
+        info(f"[LLM] merge_summaries: got {len(result)} chars response")
         return result
 
 
@@ -228,7 +229,7 @@ class VisionClient:
             cleaned = _clean(raw)
             if cleaned:
                 if finish == "length":
-                    print(f"[VISION] Description truncated (hit max_tokens). Length: {len(cleaned)} chars")
+                    info(f"[VISION] Description truncated (hit max_tokens). Length: {len(cleaned)} chars")
                 return cleaned
-            print(f"[VISION] Empty response (attempt {attempt + 1}/{max_retries}). Raw: {repr(raw[:200])}")
+            info(f"[VISION] Empty response (attempt {attempt + 1}/{max_retries}). Raw: {repr(raw[:200])}")
         return ""

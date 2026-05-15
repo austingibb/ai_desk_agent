@@ -8,6 +8,7 @@ from PIL import Image, ImageDraw, ImageFont
 from adafruit_epd.ssd1680 import Adafruit_SSD1680Z
 from adafruit_epd.epd import Adafruit_EPD
 from config import DISPLAY_WIDTH, DISPLAY_HEIGHT, FONT_BOLD, FONT_REGULAR
+from logger import info
 
 MIN_REFRESH_INTERVAL = 10  # seconds between e-ink refreshes
 
@@ -69,7 +70,7 @@ class Display:
         elapsed = time.monotonic() - self._last_refresh
         if elapsed < MIN_REFRESH_INTERVAL:
             wait = MIN_REFRESH_INTERVAL - elapsed
-            print(f"[DISPLAY] Waiting {wait:.1f}s for e-ink cooldown")
+            info(f"[DISPLAY] Waiting {wait:.1f}s for e-ink cooldown")
             time.sleep(wait)
 
         self.epd.fill(Adafruit_EPD.WHITE)
@@ -91,7 +92,7 @@ class Display:
         self.epd.image(image)
         self.epd.display()
         self._last_refresh = time.monotonic()
-        print(f"[DISPLAY] Refreshed: '{text[:50]}'")
+        info(f"[DISPLAY] Refreshed: '{text[:50]}'")
 
 
     def show_booting(self):

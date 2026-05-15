@@ -4,6 +4,7 @@ import os
 import json
 import time as _time
 from config import PROJECT_DIR
+from logger import info
 
 NOTIFICATIONS_FILE = os.path.join(PROJECT_DIR, "notifications.json")
 
@@ -29,9 +30,9 @@ class NotificationStore:
             for n in self.notifications:
                 if n.get("last_fired") and n["last_fired"] > self._last_fire_time:
                     self._last_fire_time = n["last_fired"]
-            print(f"[NOTIF] Loaded {len(self.notifications)} notifications")
+            info(f"[NOTIF] Loaded {len(self.notifications)} notifications")
         except Exception as e:
-            print(f"[NOTIF] Load error: {e}")
+            info(f"[NOTIF] Load error: {e}")
 
     def _save(self):
         try:
@@ -44,7 +45,7 @@ class NotificationStore:
                     f,
                 )
         except Exception as e:
-            print(f"[NOTIF] Save error: {e}")
+            info(f"[NOTIF] Save error: {e}")
 
     def create_proposal(self, message, category, trigger_type, trigger_value):
         notif = {

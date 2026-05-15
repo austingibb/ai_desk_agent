@@ -11,6 +11,7 @@ from config import PIN_YES, PIN_NO
 
 import gpiod
 from display import Display
+from logger import info
 
 
 DISPLAY_LOCK = threading.Lock()
@@ -28,17 +29,17 @@ def button_monitor_thread():
                 if not button_request.get_value(PIN_YES):
                     button_state["button"] = "YES"
                     button_state["timestamp"] = time.time()
-                    print(f"[BUTTON] YES pressed")
+                    info(f"[BUTTON] YES pressed")
                 elif not button_request.get_value(PIN_NO):
                     button_state["button"] = "NO"
                     button_state["timestamp"] = time.time()
-                    print(f"[BUTTON] NO pressed")
+                    info(f"[BUTTON] NO pressed")
         time.sleep(0.1)
 
 
 class DisplayHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
-        print(f"[HTTP] {args[0] if args else fmt}")
+        info(f"[HTTP] {args[0] if args else fmt}")
 
     def _send_json(self, data, status=200):
         body = json.dumps(data).encode()
@@ -103,16 +104,16 @@ def init_buttons():
     for pin in (PIN_YES, PIN_NO):
         cfg[pin] = gpiod.LineSettings(direction=gpiod.line.Direction.INPUT, bias=gpiod.line.Bias.PULL_UP)
     button_request = gpiod.request_lines("/dev/gpiochip0", cfg, consumer="ai-eink-buttons")
-    print("Buttons initialized.")
+    info("Buttons initialized.")
 
 
 def main():
     global display
 
-    print("Initializing display...")
+    info("Initializing display...")
     display = Display()
     display.show_booting()
-    print("Display initialized.")
+    info("Display initialized.")
 
     init_buttons()
 
@@ -120,10 +121,10 @@ def main():
     t.start()
 
     server = HTTPServer(("0.0.0.0", 5050), DisplayHandler)
-    print("Display server listening on :5050")
+    info("Display server listening on :5050")
 
     def shutdown(sig, frame):
-        print("\nShutting down...")
+        info("\nShutting down...")
         server.shutdown()
 
     signal.signal(signal.SIGINT, shutdown)
@@ -132,12 +133,12 @@ def main():
     try:
         server.serve_forever()
     finally:
-        print("Cleaning up...")
+        info("Cleaning up...")
         if button_request:
             button_request.release()
         if display:
             display.show_text("Offline")
-        print("Done.")
+        info("Done.")
 
 
 if __name__ == "__main__":
