@@ -758,7 +758,7 @@ const rendered=new Set();
 let initialized=false;
 
 function msgKey(m){
-  return m.role+'|'+m.time+'|'+m.content.slice(0,60);
+  return m.role+'|'+m.content.slice(0,80);
 }
 
 function msgHTML(m){
@@ -803,10 +803,6 @@ document.getElementById('form').onsubmit=async e=>{
   inp.value='';
   const resp=await fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg})});
   if(resp.ok){
-    const entry={role:'user',content:msg,time:'now'};
-    div.insertAdjacentHTML('beforeend',msgHTML(entry));
-    rendered.add(msgKey(entry));
-    div.scrollTop=div.scrollHeight;
     setTimeout(refresh,500);
   }
 };
