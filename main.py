@@ -2,6 +2,7 @@
 """AI E-Ink Friend — agent loop orchestrator. Runs on Pi 5 (192.168.0.39)."""
 
 import time
+import os
 import signal
 import sys
 import json
@@ -10,6 +11,7 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 from config import (
+    PROJECT_DIR,
     DISPLAY_SERVER_URL,
     build_system_prompt,
     get_tool_definitions,
@@ -96,10 +98,22 @@ class Orchestrator:
         self.scene_lock = threading.Lock()
         self.vision_requests_shown = False  # tracks if we've shown existing requests this turn
 
-        # Chat auth
-        self.session_token = secrets.token_hex(32)
-        print(f"[AUTH] Session token generated, password: {'***' if CHAT_PASSWORD != 'admin' else 'admin (default)'}")
-        print(f"[AUTH] Session lasts {CHAT_SESSION_DAYS} days")
+        # Chat auth — persist session token across restarts
+        self._token_file = os.path.join(PROJECT_DIR, ".session_token")
+        if os.path.exists(self._token_file):
+            try:
+                with open(self._token_file, "r") as f:
+                    self.session_token = f.read().strip()
+                if self.session_token:
+                    print(f"[AUTH] Loaded existing session token")
+            except Exception:
+                self.session_token = ""
+        if not self.session_token:
+            self.session_token = secrets.token_hex(32)
+            with open(self._token_file, "w") as f:
+                f.write(self.session_token)
+            print(f"[AUTH] Generated new session token")
+        print(f"[AUTH] Password: {'***' if CHAT_PASSWORD != 'admin' else 'admin (default)'}, session lasts {CHAT_SESSION_DAYS} days")
 
         try:
             print("Init MCP client...")
