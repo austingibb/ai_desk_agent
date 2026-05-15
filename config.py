@@ -89,6 +89,10 @@ CAMERA_HEIGHT = 1296
 JPEG_QUALITY = 50
 ENABLE_CAMERA = os.environ.get("ENABLE_CAMERA", "1") == "1"
 
+# TTS (Piper HTTP server)
+ENABLE_TTS = os.environ.get("ENABLE_TTS", "0") == "1"
+PIPER_HTTP_URL = os.environ.get("PIPER_HTTP_URL", "http://localhost:5000")
+
 # Font paths
 FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 FONT_REGULAR = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"

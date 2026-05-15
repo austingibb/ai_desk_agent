@@ -42,6 +42,7 @@ from camera import Camera
 from ai_client import AIClient, VisionClient
 from mcp_client import MCPClient
 from sounds import play as play_sound
+from tts import speak as tts_speak, interrupt as tts_interrupt
 import logger
 from logger import info
 
@@ -453,11 +454,14 @@ class Orchestrator:
         t = threading.Thread(target=loop, daemon=True)
         t.start()
 
-    def _tool_update_display(self, args: dict) -> dict:
+    def _tool_update_display(self, args: dict, speak: bool = True) -> dict:
         text = args.get("text", "")
 
         if not text.strip():
             return {"status": "error", "message": "No text provided"}
+
+        if speak:
+            tts_speak(text)
 
         timestamp = time.strftime("%-I:%M%p").lower().lstrip("0")
         text = f"{text}\n\n— {timestamp}"
@@ -479,6 +483,8 @@ class Orchestrator:
         if not text.strip():
             return {"status": "error", "message": "No text provided"}
 
+        tts_speak(text)
+
         # Show a preview on the e-ink display
         preview_max = 90
         if len(text) <= preview_max:
@@ -486,7 +492,7 @@ class Orchestrator:
         else:
             preview = text[:preview_max].rsplit(" ", 1)[0] + "..."
         display_text = f"{preview}\n(full message on chat)"
-        self._tool_update_display({"text": display_text})
+        self._tool_update_display({"text": display_text}, speak=False)
 
         return {"status": "ok", "message": "Chat message sent and display preview shown."}
 
@@ -709,6 +715,7 @@ class Orchestrator:
 
     def cleanup(self):
         info("Cleaning up...")
+        tts_interrupt()
         with self.ctx_lock:
             self.ctx.save()
         try:
