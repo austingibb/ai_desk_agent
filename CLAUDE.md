@@ -5,7 +5,7 @@ Two Raspberry Pis running an autonomous AI agent that observes the room through 
 ## Architecture
 
 ```
-Pi 5 (192.168.0.39) — Orchestrator (main.py)
+Pi 5 — Orchestrator (main.py)
 ├── camera.py        → Picamera2 capture (2304×1296 full FOV → 640px downscale)
 ├── ai_client.py     → AIClient (DeepSeek/OpenRouter) + VisionClient (local Gemma/llama.cpp)
 ├── context.py       → Message history, timestamps, token counting, compaction, pairing repair
@@ -14,11 +14,11 @@ Pi 5 (192.168.0.39) — Orchestrator (main.py)
 ├── notifications.py → Notification proposals, approval/rejection, decay scoring
 └── chat server :8080  → Web UI for user to type messages
 
-Pi Zero 2W (192.168.0.38) — Display Server (display_server.py :5050)
+Pi Zero 2W — Display Server (display_server.py :5050)
 ├── display.py       → SSD1680Z e-ink driver (122×250 via SPI)
 └── buttons.py       → GPIO button polling (YES=5, NO=6, active LOW)
 
-LLM Server (192.168.0.4:8081)
+LLM Server (llama.cpp :8081)
 └── llama.cpp running Gemma 4 31B Q4 — vision descriptions + compaction fallback
 ```
 
@@ -97,7 +97,7 @@ All in `config.py`. Key constants:
 - `LLM_MAX_TOKENS` (2048), `LLM_MAX_TOKENS_COMPACT` (1024), `LLM_TIMEOUT` (120s)
 
 ### Vision LLM (local Gemma/llama.cpp)
-- `VISION_BASE_URL` (default: `http://192.168.0.4:8081/v1`)
+- `VISION_BASE_URL` (default: `http://<llama-server>:8081/v1`)
 - `VISION_MODEL` (default: `gemma-4-31B-it-UD-Q4_K_XL.gguf`)
 - `VISION_POLL_INTERVAL` (180s), `VISION_TIMEOUT` (60s)
 
@@ -145,7 +145,7 @@ Chat messages are queued (`chat_queue`) and drained at safe points to avoid brea
 Web UI on `:8080`. Password-protected login with session cookie. Supports optional HTTPS via mkcert certificates.
 
 - **Auth**: Password from `CHAT_PASSWORD` env var (default `admin`). Random 32-byte session token in `HttpOnly` cookie, expires after `CHAT_SESSION_DAYS` (7 days). Login page at `/login` with password form, redirects to `/` on success.
-- **HTTPS**: Set `CHAT_USE_HTTPS=1` and provide `SSL_CERT_FILE`/`SSL_KEY_FILE` (mkcert certs). Cookie gains `Secure` flag. Access via `https://192.168.0.39:8080`.
+- **HTTPS**: Set `CHAT_USE_HTTPS=1` and provide `SSL_CERT_FILE`/`SSL_KEY_FILE` (mkcert certs). Cookie gains `Secure` flag. Access via `https://<pi5-ip>:8080`.
 - **GET `/`** → chat HTML (requires auth, else login page)
 - **GET `/chat`** → last 50 filtered messages as JSON (with timestamps as metadata). Deduplicates user messages between context and chat queue. Requires auth (else 401).
 - **POST `/chat`** → queues message and signals the agent loop. Detects notification rejection keywords ("no", "stop", "cancel").
@@ -163,11 +163,11 @@ Web UI on `:8080`. Password-protected login with session cookie. Supports option
 
 **Deploy**: Commit + push, then SSH to each Pi and pull + restart services:
 ```bash
-ssh austingibb@192.168.0.39 'cd ~/ai_eink && git pull && sudo systemctl restart ai-eink'
-ssh austingibb@192.168.0.38 'cd ~/ai_eink && git pull && sudo systemctl restart display-server'
+ssh user@<pi5-ip> 'cd ~/ai_eink && git pull && sudo systemctl restart ai-eink'
+ssh user@<pizero-ip> 'cd ~/ai_eink && git pull && sudo systemctl restart display-server'
 ```
 
-**Watch logs**: `ssh austingibb@192.168.0.39 'sudo journalctl -u ai-eink -f'`
+**Watch logs**: `ssh user@<pi5-ip> 'sudo journalctl -u ai-eink -f'`
 
 **Test locally**: `python3 -c "import py_compile; py_compile.compile('main.py', doraise=True)"` (no Pi dependencies needed for syntax check)
 

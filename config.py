@@ -5,7 +5,7 @@ PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(PROJECT_DIR, ".env"))
 
 # Network
-DISPLAY_SERVER_URL = os.environ.get("DISPLAY_SERVER_URL", "http://192.168.0.38:5050")
+DISPLAY_SERVER_URL = os.environ.get("DISPLAY_SERVER_URL", "http://localhost:5050")
 
 # Brain LLM — DeepSeek on OpenRouter
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://openrouter.ai/api/v1")
@@ -16,7 +16,7 @@ LLM_MAX_TOKENS_COMPACT = 1024
 LLM_TIMEOUT = 120
 
 # Vision LLM — local Gemma on llama.cpp
-VISION_BASE_URL = os.environ.get("VISION_BASE_URL", "http://192.168.0.4:8081/v1")
+VISION_BASE_URL = os.environ.get("VISION_BASE_URL", "http://localhost:8081/v1")
 VISION_MODEL = os.environ.get("VISION_MODEL", "gemma-4-31B-it-UD-Q4_K_XL.gguf")
 VISION_API_KEY = os.environ.get("VISION_API_KEY", "")
 VISION_POLL_INTERVAL = int(os.environ.get("VISION_POLL_INTERVAL", "180"))  # 3 min

@@ -6,9 +6,9 @@ An autonomous AI friend running on two Raspberry Pis — it watches the room, sh
 
 | Device | Role |
 |--------|------|
-| **Pi 5 (CM5, .39)** | Orchestrator — runs the AI agent loop, camera, web chat server |
-| **Pi Zero 2W (.38)** | Display server — drives SSD1680Z e-ink (122×250) + two GPIO buttons |
-| **Separate machine (.4:8081)** | Vision LLM via llama.cpp — Gemma 4 31B for photo descriptions |
+| **Pi 5** | Orchestrator — runs the AI agent loop, camera, web chat server |
+| **Pi Zero 2W** | Display server — drives SSD1680Z e-ink (122×250) + two GPIO buttons |
+| **Any machine with a GPU** | Vision LLM via llama.cpp — runs Gemma 4 31B for photo descriptions. Anything faster than a Pi 5 works here. |
 
 ## How it works
 
@@ -43,7 +43,7 @@ When the brain calls `take_photo`, it gets the cached description instantly — 
 
 ### Interaction
 
-- **Web chat** (`https://192.168.0.39:8080`) — Password-protected login with session cookie (7 day expiry). Type messages to the AI, see its display responses with timestamps. Append-only rendering — scroll up to read history without being dragged to bottom.
+- **Web chat** — Password-protected login with session cookie (7 day expiry). Type messages to the AI, see its display responses with timestamps. Append-only rendering — scroll up to read history without being dragged to bottom.
 - **Physical buttons** (GPIO 5/6) — Press either button to nudge the AI to say something new, or approve a proposed notification
 - **Brave Search** — MCP integration for web search, news, images, and more
 
@@ -95,7 +95,7 @@ Set via environment variables or `.env` file:
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `VISION_BASE_URL` | `http://192.168.0.4:8081/v1` | Local llama.cpp server |
+| `VISION_BASE_URL` | `http://<llama-server>:8081/v1` | Local llama.cpp server |
 | `VISION_MODEL` | `gemma-4-31B-it-UD-Q4_K_XL.gguf` | Vision model name |
 | `VISION_API_KEY` | _(empty)_ | Optional |
 | `VISION_POLL_INTERVAL` | `180` | Seconds between photo captures |
@@ -120,18 +120,18 @@ Set via environment variables or `.env` file:
 ## HTTPS Setup (optional)
 
 ```bash
-# On your Mac (one time)
+# On your dev machine (one time)
 brew install mkcert
 sudo mkcert -install
-mkcert 192.168.0.39 localhost
+mkcert <pi5-ip> localhost
 
 # Copy certs to Pi
-rsync -avz 192.168.0.39+1.pem 192.168.0.39+1-key.pem austingibb@192.168.0.39:~/.config/certs/
+rsync -avz <pi5-ip>+1.pem <pi5-ip>+1-key.pem user@<pi5-ip>:~/.config/certs/
 
 # Set in .env on Pi
 CHAT_USE_HTTPS=1
-SSL_CERT_FILE=/home/austingibb/.config/certs/192.168.0.39+1.pem
-SSL_KEY_FILE=/home/austingibb/.config/certs/192.168.0.39+1-key.pem
+SSL_CERT_FILE=/home/user/.config/certs/<pi5-ip>+1.pem
+SSL_KEY_FILE=/home/user/.config/certs/<pi5-ip>+1-key.pem
 ```
 
 ## Deployment
@@ -155,14 +155,14 @@ sudo systemctl enable --now display-server
 ### Quick deploy (from dev machine)
 
 ```bash
-ssh austingibb@192.168.0.39 'cd ~/ai_eink && git pull && sudo systemctl restart ai-eink'
-ssh austingibb@192.168.0.38 'cd ~/ai_eink && git pull && sudo systemctl restart display-server'
+ssh user@<pi5-ip> 'cd ~/ai_eink && git pull && sudo systemctl restart ai-eink'
+ssh user@<pizero-ip> 'cd ~/ai_eink && git pull && sudo systemctl restart display-server'
 ```
 
 ### Watching logs
 
 ```bash
-ssh austingibb@192.168.0.39 'sudo journalctl -u ai-eink -f'
+ssh user@<pi5-ip> 'sudo journalctl -u ai-eink -f'
 ```
 
 ## Files
