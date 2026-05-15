@@ -2,6 +2,8 @@
 
 An autonomous AI friend running on two Raspberry Pis — it watches the room, shares thoughts on an e-ink display, and chats with you. Uses DeepSeek on OpenRouter as the brain and local Gemma 4 for vision.
 
+The real purpose: keeping you honest about the daily stuff — getting up from the desk, drinking water, staying on track with studying and applications instead of drifting. It's the small nudge in the moment, the reminder of what you said you wanted, so the long-term goals actually get there one day at a time.
+
 ## Hardware
 
 | Device | Role |
