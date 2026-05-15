@@ -100,6 +100,7 @@ class Orchestrator:
 
         # Chat auth — persist session token across restarts
         self._token_file = os.path.join(PROJECT_DIR, ".session_token")
+        self.session_token = ""
         if os.path.exists(self._token_file):
             try:
                 with open(self._token_file, "r") as f:
