@@ -8,9 +8,9 @@ The real purpose: keeping you honest about the daily stuff — getting up from t
 
 | Device | Role |
 |--------|------|
-| **Pi 5** | Orchestrator — runs the AI agent loop, camera, web chat server |
+| **Pi 5** | Orchestrator — runs the AI agent loop, camera, web chat server. Anything faster than a pi 5 works here. |
 | **Pi Zero 2W** | Display server — drives SSD1680Z e-ink (122×250) + two GPIO buttons |
-| **Any machine with a GPU** | Vision LLM via llama.cpp — runs Gemma 4 31B for photo descriptions. Anything faster than a Pi 5 works here. |
+| **Any machine with a GPU** | Vision LLM via llama.cpp — runs Gemma 4 31B for photo descriptions. |
 
 ## How it works
 
