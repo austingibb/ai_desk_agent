@@ -1,4 +1,4 @@
-# AI E-Ink Friend
+# AI E-Ink Assistant
 
 An autonomous AI friend running on two Raspberry Pis — it watches the room, shares thoughts on an e-ink display, and chats with you. Uses DeepSeek on OpenRouter as the brain and local Gemma 4 for vision.
 
