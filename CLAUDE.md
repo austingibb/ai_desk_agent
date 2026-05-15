@@ -76,8 +76,9 @@ When DeepSeek calls `take_photo`, it gets the cached description instantly.
 - `take_photo` — returns cached text description from background vision thread (instant)
 - `capture_photo` — takes a new photo and blocks until the vision model describes it (up to 120s). Use sparingly — only for moments you genuinely need fresh info.
 - `update_display` — show message on e-ink (~140 chars max)
+- `send_chat_message` — send longer message to the chat UI (no length limit). E-ink shows a short preview.
 - `wait` — pause with button/chat interruption polling
-- `propose_notification` — propose a recurring notification for user approval
+- `propose_notification`, `schedule_notification`, `delete_notification` — manage recurring notifications
 - `update_vision_requests` — modify what the vision model looks for
 
 **MCP tools** (Brave Search, via `mcp_client.py`):
@@ -113,6 +114,12 @@ All in `config.py`. Key constants:
 - `REVIEW_INTERVAL` (1800s / 30 min), `MAX_PROPOSAL_INTERVAL` (7200s / 2h between proposals)
 - `MAX_FIRINGS_PER_HOUR` (1), `CATEGORY_COOLDOWN_REVIEWS` (3)
 
+### Chat
+- `CHAT_PASSWORD` (env, default `admin`) — password for web UI login
+- `CHAT_SESSION_DAYS` (7) — session cookie expiry in days
+- `CHAT_USE_HTTPS` (env, default 0) — enable TLS via mkcert certs
+- `SSL_CERT_FILE`, `SSL_KEY_FILE` — paths to TLS certificate and key
+
 ### Hardware
 - `ENABLE_CAMERA` (env, default 1) — toggle camera/vision features
 - `CAMERA_WIDTH` (2304), `CAMERA_HEIGHT` (1296) — full sensor FOV
@@ -135,7 +142,15 @@ Chat messages are queued (`chat_queue`) and drained at safe points to avoid brea
 
 ## Chat Server
 
-Web UI on `:8080`. GET `/chat` returns last 50 filtered messages as JSON (with timestamps as metadata). POST `/chat` queues message and signals the agent loop. Detects notification rejection keywords ("no", "stop", "cancel") in chat input.
+Web UI on `:8080`. Password-protected login with session cookie. Supports optional HTTPS via mkcert certificates.
+
+- **Auth**: Password from `CHAT_PASSWORD` env var (default `admin`). Random 32-byte session token in `HttpOnly` cookie, expires after `CHAT_SESSION_DAYS` (7 days). Login page at `/login` with password form, redirects to `/` on success.
+- **HTTPS**: Set `CHAT_USE_HTTPS=1` and provide `SSL_CERT_FILE`/`SSL_KEY_FILE` (mkcert certs). Cookie gains `Secure` flag. Access via `https://192.168.0.39:8080`.
+- **GET `/`** → chat HTML (requires auth, else login page)
+- **GET `/chat`** → last 50 filtered messages as JSON (with timestamps as metadata). Deduplicates user messages between context and chat queue. Requires auth (else 401).
+- **POST `/chat`** → queues message and signals the agent loop. Detects notification rejection keywords ("no", "stop", "cancel").
+- **POST `/login`** → validates password, sets session cookie, redirects to `/`
+- **Rendering**: Client appends new messages only (no full DOM replacement). Tracks rendered messages via `Set` of content signatures. Auto-scrolls only when user is at bottom — scroll up to read history without interruption.
 
 ## Add New Tool
 

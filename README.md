@@ -17,7 +17,7 @@ The AI runs in an autonomous agent loop with a **two-model architecture**:
 - **DeepSeek on OpenRouter** — the brain. Handles reasoning, tool calling, conversation, and notification management. Text-only, no images.
 - **Local Gemma 4 31B** — vision-only. A background thread captures photos every ~3 minutes, sends them to Gemma for a text description, and caches the result.
 
-When the brain calls `take_photo`, it gets the cached description instantly — no round-trip to the vision model during the agent loop.
+When the brain calls `take_photo`, it gets the cached description instantly — no round-trip to the vision model during the agent loop. For moments when it genuinely needs to see what's happening *right now* (e.g., "did the user actually do what they said?"), `capture_photo` takes a new photo and blocks until the vision model responds (up to 120s).
 
 ### Agent loop
 
@@ -30,18 +30,30 @@ When the brain calls `take_photo`, it gets the cached description instantly — 
 
 | Tool | What it does |
 |------|-------------|
-| `take_photo` | Returns a cached text description of the room (photos taken automatically every ~3 min) |
-| `update_display` | Renders text (~140 chars max) on the e-ink display with a timestamp |
-| `wait` | Pauses — polls for button presses or chat messages every second |
+| `take_photo` | Returns a cached text description of the room (photos taken automatically every ~3 min). Instant. |
+| `capture_photo` | Takes a new photo and waits for the vision model to describe it. Slow (up to 120s) — use sparingly. |
+| `update_display` | Renders a SHORT message (~140 chars max) on the e-ink display with a timestamp |
+| `send_chat_message` | Sends a LONG message to the chat UI (no length limit). The e-ink shows a short preview. |
+| `wait` | Pauses — polls for button presses, chat messages, notifications, and review intervals |
 | `propose_notification` | Proposes a recurring notification for user approval via button press |
+| `schedule_notification` | Schedules when a notification fires next (interval or deferral) |
+| `delete_notification` | Permanently deletes a notification by ID |
 | `update_vision_requests` | Changes what the vision model looks for when describing the scene |
 | Brave Search tools | Web, local, image, video, news search + summarizer via MCP |
 
 ### Interaction
 
-- **Web chat** (`http://192.168.0.39:8080`) — Type messages to the AI, see its display responses with timestamps
+- **Web chat** (`https://192.168.0.39:8080`) — Password-protected login with session cookie (7 day expiry). Type messages to the AI, see its display responses with timestamps. Append-only rendering — scroll up to read history without being dragged to bottom.
 - **Physical buttons** (GPIO 5/6) — Press either button to nudge the AI to say something new, or approve a proposed notification
 - **Brave Search** — MCP integration for web search, news, images, and more
+
+### Chat security
+
+- Password login via `CHAT_PASSWORD` env var (default: `admin`)
+- Random 32-byte session token, stored in an `HttpOnly` cookie
+- Session lasts 7 days before re-login required
+- Optional HTTPS via [mkcert](https://github.com/FiloSottile/mkcert) — set `CHAT_USE_HTTPS=1` and provide `SSL_CERT_FILE` / `SSL_KEY_FILE`
+- Cookie gets `Secure` flag when HTTPS is enabled
 
 ### Wait
 
@@ -88,6 +100,15 @@ Set via environment variables or `.env` file:
 | `VISION_API_KEY` | _(empty)_ | Optional |
 | `VISION_POLL_INTERVAL` | `180` | Seconds between photo captures |
 
+### Chat & Security
+
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `CHAT_PASSWORD` | `admin` | Password for web chat login |
+| `CHAT_USE_HTTPS` | `0` | Set to `1` to enable HTTPS |
+| `SSL_CERT_FILE` | `cert.pem` (project dir) | Path to TLS certificate |
+| `SSL_KEY_FILE` | `key.pem` (project dir) | Path to TLS private key |
+
 ### Other
 
 | Variable | Default | Notes |
@@ -95,6 +116,23 @@ Set via environment variables or `.env` file:
 | `ENABLE_CAMERA` | `1` | Set to `0` to disable camera/vision tools |
 | `COMPACT_AFTER_N_MESSAGES` | `150` | Trigger compaction threshold |
 | `REVIEW_INTERVAL` | `1800` | Seconds between notification reviews |
+
+## HTTPS Setup (optional)
+
+```bash
+# On your Mac (one time)
+brew install mkcert
+sudo mkcert -install
+mkcert 192.168.0.39 localhost
+
+# Copy certs to Pi
+rsync -avz 192.168.0.39+1.pem 192.168.0.39+1-key.pem austingibb@192.168.0.39:~/.config/certs/
+
+# Set in .env on Pi
+CHAT_USE_HTTPS=1
+SSL_CERT_FILE=/home/austingibb/.config/certs/192.168.0.39+1.pem
+SSL_KEY_FILE=/home/austingibb/.config/certs/192.168.0.39+1-key.pem
+```
 
 ## Deployment
 
