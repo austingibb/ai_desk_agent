@@ -2,7 +2,6 @@
 
 import json
 import os
-import re
 import time as _time
 from config import COMPACT_AFTER_N_MESSAGES, KEEP_LAST_N_MESSAGES, PROJECT_DIR, TOKEN_ESTIMATE_DIVISOR, MERGE_SUMMARIES_AFTER
 from logger import info
@@ -443,14 +442,13 @@ class Context:
         info(f"[CONTEXT] Merging {len(summary_items)} summaries ({len(summaries_text)} total chars)...")
 
         try:
-            result = ai_client.merge_summaries(summaries_text)
+            merged = ai_client.merge_summaries(summaries_text)
         except Exception as e:
             info(f"[CONTEXT] Summary merge error: {e}")
             return
 
-        merged = self._parse_merge_result(result)
-        if merged is None:
-            info(f"[CONTEXT] Summary merge produced unparseable output, skipping. Raw: {result[:200]}")
+        if not merged:
+            info(f"[CONTEXT] Summary merge produced no summaries, skipping. Input was {len(summaries_text)} chars")
             return
         if len(merged) >= len(summary_items):
             info(f"[CONTEXT] Summary merge produced {len(merged)} summaries (was {len(summary_items)}), skipping — not an improvement")
@@ -476,37 +474,6 @@ class Context:
         self.messages = non_summaries
         info(f"[CONTEXT] Merged {len(summary_items)} summaries into {len(new_summaries)}")
         self.save()
-
-    @staticmethod
-    def _parse_merge_result(text: str) -> list | None:
-        """Robustly parse JSON array from LLM output. Handles code fences and surrounding text."""
-        if not text:
-            return None
-        sliced = text.strip()
-        try:
-            result = json.loads(sliced)
-            if isinstance(result, list):
-                return result
-        except json.JSONDecodeError:
-            pass
-        m = re.search(r"```(?:json)?\s*(\[[\s\S]*?\])\s*```", sliced)
-        if m:
-            try:
-                result = json.loads(m.group(1))
-                if isinstance(result, list):
-                    return result
-            except json.JSONDecodeError:
-                pass
-        start = sliced.find("[")
-        end = sliced.rfind("]")
-        if start != -1 and end > start:
-            try:
-                result = json.loads(sliced[start:end + 1])
-                if isinstance(result, list):
-                    return result
-            except json.JSONDecodeError:
-                pass
-        return None
 
     def _is_image_message(self, msg: dict) -> bool:
         content = msg.get("content", "")
