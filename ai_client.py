@@ -118,67 +118,34 @@ class AIClient:
         return resp.json()["choices"][0]["message"]["content"].strip()
 
     def merge_summaries(self, summaries_text: str) -> list:
-        """Merge summaries using DeepSeek, collecting output in ~8K chunks to avoid truncation.
-
-        Returns a list of merged summary dicts with 'time_range' and 'summary' keys.
-        Empty list on failure.
-        """
+        """Merge summaries using DeepSeek. Single call — DeepSeek v4 Pro output is 384K tokens."""
         info(f"[LLM] merge_summaries: {len(summaries_text)} chars input, targeting <= {MERGE_SUMMARIES_TARGET} summaries")
-        accumulated = []
-        MAX_CHUNKS = 5
-
-        for chunk_num in range(MAX_CHUNKS):
-            is_first = (chunk_num == 0)
-
-            if is_first:
-                prompt = _MERGE_PROMPT.format(
-                    target=MERGE_SUMMARIES_TARGET,
-                    purpose=_PURPOSE,
-                    summaries=summaries_text,
-                )
-            else:
-                prompt = _MERGE_CONTINUE.format(
-                    target=MERGE_SUMMARIES_TARGET,
-                    purpose=_PURPOSE,
-                    summaries=summaries_text,
-                    produced=json.dumps(accumulated, indent=2),
-                )
-
-            content, finish = self._merge_call(prompt)
-            info(f"[LLM] merge_summaries chunk {chunk_num + 1}/{MAX_CHUNKS}: {len(content)} chars, finish={finish}")
-
-            if not content:
-                if accumulated:
-                    break
-                continue
-
-            chunk = _parse_json_array(content)
-            if chunk is None:
-                chunk = _salvage_partial(content)
-                if chunk is not None:
-                    info(f"[LLM] merge_summaries chunk {chunk_num + 1}: salvaged {len(chunk)} objects from truncated response")
-
-            if chunk:
-                accumulated.extend(chunk)
-                info(f"[LLM] merge_summaries chunk {chunk_num + 1}: +{len(chunk)} summaries (total {len(accumulated)})")
-            else:
-                info(f"[LLM] merge_summaries chunk {chunk_num + 1}: unparseable, raw={content[:120]}")
-                if accumulated:
-                    break
-                continue
-
-            if _is_done(content, finish, chunk_num, len(accumulated)):
-                break
-
-        info(f"[LLM] merge_summaries: returning {len(accumulated)} summaries after {chunk_num + 1} chunk(s)")
-        return accumulated
+        prompt = _MERGE_PROMPT.format(
+            target=MERGE_SUMMARIES_TARGET,
+            purpose=_PURPOSE,
+            summaries=summaries_text,
+        )
+        content, finish = self._merge_call(prompt)
+        info(f"[LLM] merge_summaries: {len(content)} chars, finish={finish}")
+        if not content:
+            return []
+        result = _parse_json_array(content)
+        if result is None:
+            result = _salvage_partial(content)
+            if result is not None:
+                info(f"[LLM] merge_summaries: salvaged {len(result)} objects from truncated response")
+        if result:
+            info(f"[LLM] merge_summaries: {len(result)} summaries")
+        else:
+            info(f"[LLM] merge_summaries: unparseable, raw={content[:200]}")
+        return result or []
 
     def _merge_call(self, prompt: str) -> tuple:
         """Make a merge/completion call. Returns (content, finish_reason)."""
         payload = {
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 8192,
+            "max_tokens": 40960,
             "temperature": 0.3,
         }
         resp = requests.post(
@@ -223,38 +190,18 @@ _MERGE_PROMPT = (
     "Return a JSON array of objects. Each object has:\n"
     '- "time_range": the time period covered\n'
     '- "summary": the summary text\n\n'
-    "TARGET: produce at most {target} summaries.\n\n"
-    "IMPORTANT — Output in batches to avoid truncation:\n"
-    "After your JSON array, append exactly ONE marker:\n"
-    "- [MORE] if there are more summaries still to produce on the next continuation\n"
-    "- [DONE] if this is the complete, final batch\n"
-    "The JSON array MUST contain complete, valid JSON objects. Never split an object across batches.\n\n"
+    "TARGET: produce at most {target} summaries.\n"
+    "Return ONLY the JSON array, no other text.\n\n"
     "Here are the current summaries:\n\n"
-    "{summaries}"
-)
-
-_MERGE_CONTINUE = (
-    "CONTINUATION — you are continuing to merge the same set of summaries.\n\n"
-    "You already produced these merged summaries (do NOT repeat them):\n"
-    "{produced}\n\n"
-    "Continue merging the REMAINING summaries that are NOT already covered by the above.\n"
-    "Produce the NEXT batch as a JSON array. Only include NEW merged summaries.\n"
-    "If no remaining summaries need merging, output an empty array [] and [DONE].\n"
-    "Otherwise output [MORE] if there are still more after this batch.\n\n"
-    "Full context for reference:\n\n"
     "{summaries}"
 )
 
 
 def _parse_json_array(text: str) -> list | None:
-    """Robustly parse a JSON array from LLM output. Handles code fences and markers."""
+    """Robustly parse a JSON array from LLM output. Handles code fences."""
     if not text:
         return None
     sliced = text.strip()
-    # Chop off trailing markers
-    for marker in ["[MORE]", "[DONE]"]:
-        if sliced.endswith(marker):
-            sliced = sliced[:-len(marker)].rstrip()
     try:
         result = json.loads(sliced)
         if isinstance(result, list):
@@ -272,12 +219,8 @@ def _parse_json_array(text: str) -> list | None:
     start = sliced.find("[")
     end = sliced.rfind("]")
     if start != -1 and end > start:
-        extracted = sliced[start:end + 1]
-        for marker in ["[MORE]", "[DONE]"]:
-            if extracted.endswith(marker):
-                extracted = extracted[:-len(marker)].rstrip()
         try:
-            result = json.loads(extracted)
+            result = json.loads(sliced[start:end + 1])
             if isinstance(result, list):
                 return result
         except json.JSONDecodeError:
@@ -333,24 +276,6 @@ def _salvage_partial(text: str) -> list | None:
     except json.JSONDecodeError:
         pass
     return None
-
-
-def _is_done(content: str, finish: str, chunk_num: int, total_merged: int) -> bool:
-    if "[DONE]" in content:
-        return True
-    if chunk_num > 0 and content.strip() == "[]":
-        return True
-    if finish != "length" and not _has_marker(content, "[MORE]"):
-        return True
-    if len(content) < 7000 and not _has_marker(content, "[MORE]"):
-        return True
-    if total_merged >= MERGE_SUMMARIES_TARGET:
-        return True
-    return False
-
-
-def _has_marker(text: str, marker: str) -> bool:
-    return text.rstrip().endswith(marker)
 
 
 class VisionClient:
