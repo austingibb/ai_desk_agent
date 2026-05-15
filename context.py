@@ -210,6 +210,137 @@ class Context:
             return False
         return content.startswith("[Previous context summary:")
 
+    @staticmethod
+    def _format_tool_result(msg: dict) -> str | None:
+        """Extract meaningful content from a tool result for compaction.
+        
+        Returns None if the result is pure boilerplate and should be skipped entirely.
+        Returns a clean, concise text string otherwise.
+        """
+        name = msg.get("name", "?")
+        content = msg.get("content", "")
+        if not content:
+            return None
+            
+        try:
+            data = json.loads(content) if isinstance(content, str) else content
+        except json.JSONDecodeError:
+            return content.strip()
+
+        if not isinstance(data, dict):
+            return content.strip()
+
+        error = data.get("error", False)
+        status = data.get("status", "")
+
+        # --- Boilerplate tools: skip on success, keep on error ---
+        if name in ("update_display",):
+            return None if not error else f"[display error: {data.get('message', '')}]"
+
+        if name in ("delete_notification",):
+            return None if not error else f"[delete failed: {data.get('message', '')}]"
+
+        if name in ("send_chat_message",):
+            return None
+
+        if name in ("schedule_notification",):
+            return None if not error else f"[schedule failed: {data.get('message', '')}]"
+
+        # --- wait: compact summary ---
+        if name == "wait":
+            waited = data.get("waited", "?")
+            reason = data.get("reason", "")
+            if status == "interrupted":
+                return f"[waited {waited}s, interrupted: {reason}]"
+            return f"[waited {waited}s]"
+
+        # --- Photo tools: extract description only ---
+        if name in ("take_photo", "capture_photo"):
+            desc = data.get("description", "")
+            if desc:
+                return f"[scene] {desc.strip()}"
+            return None
+
+        # --- Search tools: extract titles and snippets ---
+        if name in ("brave_web_search", "brave_local_search"):
+            results = data.get("results", [])
+            if not results:
+                title = data.get("title", "") or data.get("query", "")
+                snippet = data.get("description", "") or data.get("extra_snippets", "")
+                if isinstance(snippet, list):
+                    snippet = " | ".join(snippet[:2])
+                if title:
+                    snippet_str = f": {snippet}" if snippet else ""
+                    return f"[search] {title}{snippet_str}"
+                return f"[search: no results]"
+            lines = []
+            for r in results[:8]:
+                t = r.get("title", "") if isinstance(r, dict) else str(r)
+                s = (r.get("description", "") or r.get("extra_snippets", [])) if isinstance(r, dict) else ""
+                if isinstance(s, list):
+                    s = " | ".join(s[:2])
+                if s:
+                    lines.append(f"- {t}: {s}")
+                else:
+                    lines.append(f"- {t}")
+            return f"[search results]\n" + "\n".join(lines)
+
+        if name == "brave_news_search":
+            results = data.get("results", [])
+            if not results:
+                return f"[news: no results]"
+            lines = []
+            for r in results[:8]:
+                if isinstance(r, dict):
+                    lines.append(f"- {r.get('title', '')}: {r.get('description', '')}")
+                else:
+                    lines.append(f"- {r}")
+            return f"[news]\n" + "\n".join(lines)
+
+        if name in ("brave_image_search", "brave_video_search"):
+            results = data.get("results", [])
+            if not results:
+                return f"[{name}: no results]"
+            titles = [r.get("title", "") if isinstance(r, dict) else str(r) for r in results[:5]]
+            return f"[{name}: {', '.join(titles)}]"
+
+        if name == "brave_summarizer":
+            summary = data.get("summary", "") or data.get("content", "")
+            if summary:
+                return f"[summary] {str(summary).strip()}"
+            return None
+
+        # --- Vision requests ---
+        if name == "update_vision_requests":
+            requests_text = data.get("requests", "") or data.get("message", "")
+            if requests_text:
+                return f"[vision: {str(requests_text).strip()}]"
+            return None
+
+        # --- Notification proposals: keep details ---
+        if name == "propose_notification":
+            notif = data.get("notification", data)
+            title = notif.get("title", "") or notif.get("category", "")
+            desc = notif.get("description", "") or notif.get("message", "")
+            if title or desc:
+                return f"[proposed: {title} — {desc}]"
+            return f"[proposed notification]"
+
+        # --- Fallback: simplify JSON to key fields ---
+        meaningful = {}
+        for k, v in data.items():
+            if k in ("status", "error", "message"):
+                continue
+            if isinstance(v, str) and len(v) < 200:
+                meaningful[k] = v
+            elif isinstance(v, str):
+                meaningful[k] = v[:200] + "..."
+            elif isinstance(v, (int, float, bool)):
+                meaningful[k] = v
+        if meaningful:
+            return json.dumps(meaningful)
+        return None
+
     def _find_safe_end(self, start: int, desired_end: int) -> int:
         """Adjust compaction end so we never split an assistant/tool group.
         
@@ -272,9 +403,13 @@ class Context:
                 )
             if m.get("tool_calls"):
                 tools = ", ".join(tc["function"]["name"] for tc in m["tool_calls"])
-                content = f"[called tools: {tools}] {content}"
+                content = f"[{tools}] {content}"
             if role == "tool":
-                content = f"[tool result for {m.get('name', '?')}] {content}"
+                compacted = self._format_tool_result(m)
+                if compacted is None:
+                    continue
+                content = compacted
+                role = "tool"
             text_parts.append(f"{ts_str} {role}: {content}")
 
         combined = "\n".join(text_parts)
