@@ -152,10 +152,15 @@ class AIClient:
             f"{self.base_url}/chat/completions",
             headers=self._headers,
             json=payload,
-            timeout=LLM_TIMEOUT,
+            timeout=300,
         )
-        resp.raise_for_status()
+        if not resp.ok:
+            info(f"[LLM] _merge_call: {resp.status_code} error: {resp.text[:300]}")
+            resp.raise_for_status()
         data = resp.json()
+        if "choices" not in data:
+            info(f"[LLM] _merge_call: no 'choices' in response. Keys: {list(data.keys())}. Body: {json.dumps(data)[:300]}")
+            return "", "error"
         choice = data["choices"][0]
         finish = choice.get("finish_reason", "unknown")
         content = choice["message"].get("content")
