@@ -12,7 +12,7 @@ LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://openrouter.ai/api/v1")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
 LLM_MODEL = os.environ.get("LLM_MODEL", "deepseek/deepseek-chat")
 LLM_MAX_TOKENS = 2048
-LLM_MAX_TOKENS_COMPACT = 1024
+LLM_MAX_TOKENS_COMPACT = int(os.environ.get("LLM_MAX_TOKENS_COMPACT", "64000"))
 LLM_TIMEOUT = 120
 
 # Vision LLM — local Gemma on llama.cpp

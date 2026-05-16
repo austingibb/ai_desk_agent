@@ -99,8 +99,34 @@ class AIClient:
 
     def compact(self, text: str) -> str:
         """Summarize old context using DeepSeek."""
+        prompt = (
+            f"{_PURPOSE}\n\n"
+            "You are compacting a block of conversation history into a short summary for the AI's long-term memory.\n"
+            "The input is a log of messages from the AI assistant and its user. Each line starts with a timestamp [Day HH:MM:SS] "
+            "followed by the role (user/assistant/tool) and content.\n\n"
+            "Write a dense, narrative summary (1-3 paragraphs) of what HAPPENED, not a line-by-line replay. "
+            "Focus on the story, not the mechanics.\n\n"
+            "PRIORITIZE (include these):\n"
+            "- USER MESSAGES: every thing the user said — questions, preferences, corrections, personality, jokes\n"
+            "- SCENE CHANGES: only mention when something DIFFERENT happened — user arrived, left, switched activities, "
+            "changed lighting significantly. Do NOT repeat similar scene descriptions.\n"
+            "- NOTIFICATIONS: what was proposed, approved/rejected, scheduled, or deleted\n"
+            "- HABIT PATTERNS: e.g. user ignored stretch reminders, worked past midnight, actually got up and moved\n"
+            "- CONVERSATION TOPICS: what was discussed, running jokes, things the user expressed interest in\n"
+            "- INTERESTING SEARCH RESULTS: key facts or finds the AI shared\n"
+            "- USER ENGAGEMENT: whether the user was chatting, pressing buttons, or absent\n\n"
+            "DROP / CONDENSE (skip or mention once):\n"
+            "- Routine photo descriptions where nothing changed (same person at desk, same lighting)\n"
+            "- Wait cycles with no interruptions\n"
+            "- Boilerplate update_display / send_chat_message results (their content matters, the tool call doesn't)\n"
+            "- Redundant scene descriptions — if the scene barely changed, don't describe it again\n"
+            "- Restarts and boot messages — mention once if it happened multiple times\n\n"
+            "FORMAT: Write a plain narrative paragraph. No bullet points, no markdown, no timestamps in the output. "
+            "Just tell what happened during this time period.\n\n"
+            f"Here is the log to summarize:\n\n{text}"
+        )
         messages = [
-            {"role": "user", "content": f"{_PURPOSE} When summarizing, prioritize information that helps you fulfill this role.\n\nSummarize these observations and interactions concisely, preserving key events, decisions, and patterns. Pay attention to timestamps to understand the sequence and timing of events:\n\n{text}"}
+            {"role": "user", "content": prompt}
         ]
         payload = {
             "model": self.model,

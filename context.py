@@ -415,8 +415,20 @@ class Context:
         combined = "\n".join(text_parts)
         try:
             summary = ai_client.compact(combined)
-        except Exception:
-            summary = combined[:1000]
+        except Exception as e:
+            info(f"[CONTEXT] Compaction LLM call failed: {e}")
+            user_msgs = []
+            for m in to_compact:
+                if m.get("role") == "user" and not m.get("tool_calls"):
+                    content = m.get("content", "")
+                    if isinstance(content, list):
+                        content = " ".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text")
+                    if content and isinstance(content, str) and len(content.strip()) > 0:
+                        user_msgs.append(f"{_ts_fmt(m.get('_ts', 0))} {content.strip()[:300]}")
+            if user_msgs:
+                summary = "COMPACTION FAILED — only user messages preserved:\n" + "\n".join(user_msgs[:30])
+            else:
+                summary = f"Compaction failed for this period — no recoverable content."
 
         new_messages = []
         if system_msg:
