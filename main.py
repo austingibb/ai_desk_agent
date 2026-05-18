@@ -144,9 +144,9 @@ class Orchestrator:
                     self.ctx.messages.insert(0, {"role": "system", "content": prompt, "_ts": self.ctx._now()})
                     info("[CONTEXT] Inserted system prompt into loaded context.")
                 if ENABLE_CAMERA:
-                    self.ctx.add_user("You just woke back up after a restart! Use take_photo to see the room and pick up where you left off.")
+                    self.ctx.add_user("A restart just occurred. Resume where you left off.")
                 else:
-                    self.ctx.add_user("You just woke back up after a restart! Camera is not available — use your other tools to pick up where you left off.")
+                    self.ctx.add_user("A restart just occurred. Camera is not available — resume where you left off.")
             else:
                 self.ctx.add_system(build_system_prompt())
                 if ENABLE_CAMERA:
