@@ -3,3 +3,6 @@ __pycache__/
 .env
 venv/
 *.zsh
+debug_images/*
+context.json
+notifications.json
