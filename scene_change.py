@@ -71,7 +71,7 @@ class SceneChangeDetector:
     (slow daylight shift, cloud shadows) doesn't accumulate into missed detections.
     """
 
-    def __init__(self, rms_threshold=12.0, pct_threshold=0.05,
+    def __init__(self, rms_threshold=10.5, pct_threshold=0.04,
                  max_stale_seconds=1800, compare_size=(160, 120),
                  max_shift_pct=0.10):
         self.rms_threshold = rms_threshold
