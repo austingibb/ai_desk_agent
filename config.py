@@ -87,6 +87,11 @@ CAMERA_HEIGHT = 1296
 JPEG_QUALITY = 50
 ENABLE_CAMERA = os.environ.get("ENABLE_CAMERA", "1") == "1"
 
+# Scene change detection — skip vision model when nothing changed
+SCENE_RMS_THRESHOLD = float(os.environ.get("SCENE_RMS_THRESHOLD", "12.0"))
+SCENE_PCT_THRESHOLD = float(os.environ.get("SCENE_PCT_THRESHOLD", "0.05"))
+SCENE_MAX_STALE_SECONDS = int(os.environ.get("SCENE_MAX_STALE_SECONDS", "1800"))
+
 # TTS (Piper HTTP server)
 ENABLE_TTS = os.environ.get("ENABLE_TTS", "0") == "1"
 PIPER_HTTP_URL = os.environ.get("PIPER_HTTP_URL", "http://localhost:5000")

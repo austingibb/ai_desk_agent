@@ -34,12 +34,16 @@ from config import (
     ENABLE_CAMERA,
     VISION_POLL_INTERVAL,
     VISION_REQUESTS_FILE,
+    SCENE_RMS_THRESHOLD,
+    SCENE_PCT_THRESHOLD,
+    SCENE_MAX_STALE_SECONDS,
 )
 from notifications import NotificationStore
 from context import Context
 from camera import Camera
 from ai_client import AIClient, VisionClient
 from mcp_client import MCPClient
+from scene_change import SceneChangeDetector
 from sounds import play as play_sound
 from tts import speak as tts_speak, interrupt as tts_interrupt
 import logger
@@ -86,6 +90,11 @@ class Orchestrator:
         # Vision background thread state
         self.latest_scene = None  # {"description": str, "timestamp": float}
         self.scene_lock = threading.Lock()
+        self.scene_detector = SceneChangeDetector(
+            rms_threshold=SCENE_RMS_THRESHOLD,
+            pct_threshold=SCENE_PCT_THRESHOLD,
+            max_stale_seconds=SCENE_MAX_STALE_SECONDS,
+        ) if ENABLE_CAMERA else None
         self.vision_requests_shown = False  # tracks if we've shown existing requests this turn
 
         # Chat auth — persist session token across restarts
@@ -437,11 +446,47 @@ class Orchestrator:
         def loop():
             info(f"[VISION] Background thread started (interval={VISION_POLL_INTERVAL}s)")
             while self.running:
-                scene = self._capture_and_describe()
-                if scene:
-                    info(f"[VISION] Scene updated: {scene['description'][:100]}...")
+                try:
+                    jpeg_bytes, photo_uri = self.camera.capture()
+                except Exception as e:
+                    info(f"[VISION] Camera error: {e}")
+                    for _ in range(VISION_POLL_INTERVAL):
+                        if not self.running:
+                            return
+                        time.sleep(1)
+                    continue
+
+                self._save_debug_image(jpeg_bytes)
+
+                # Check if scene changed before expensive vision call
+                from PIL import Image
+                import io
+                img = Image.open(io.BytesIO(jpeg_bytes))
+                result = self.scene_detector.check(img)
+                info(f"[VISION] Change detection: {result['reason']} "
+                     f"(rms={result['rms']:.1f}, pct={result['pct_changed']:.3f}, "
+                     f"shift={result['shift']})")
+
+                if result["changed"]:
+                    try:
+                        description = self.vision.describe(photo_uri)
+                    except Exception as e:
+                        info(f"[VISION] Describe error: {e}")
+                        for _ in range(VISION_POLL_INTERVAL):
+                            if not self.running:
+                                return
+                            time.sleep(1)
+                        continue
+                    if description:
+                        scene = {"description": description, "timestamp": time.time()}
+                        with self.scene_lock:
+                            self.latest_scene = scene
+                        info(f"[VISION] Scene updated: {description[:100]}...")
+                    else:
+                        info("[VISION] Got empty description from vision model, skipping")
                 else:
-                    info("[VISION] Failed to capture/describe, will retry next interval")
+                    info("[VISION] Scene unchanged, skipping vision model call")
+
                 for _ in range(VISION_POLL_INTERVAL):
                     if not self.running:
                         return
