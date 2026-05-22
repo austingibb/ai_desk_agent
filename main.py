@@ -28,7 +28,6 @@ from config import (
     SSL_CERT_FILE,
     SSL_KEY_FILE,
     REVIEW_INTERVAL,
-    CATEGORY_COOLDOWN_REVIEWS,
     POLICY_REMINDER,
     estimate_tool_tokens,
     LLM_ESTIMATED_MAX_TOKENS,
@@ -82,9 +81,7 @@ class Orchestrator:
         self.mcp = None
         self.notification_store = NotificationStore()
         self.last_review_time = time.time()
-        self.last_fired_notification_id = None
         self.active_notification = None  # {"id": str, "message": str, "remaining": int}
-        self.proposal_category_cooldowns = {}
 
         # Vision background thread state
         self.latest_scene = None  # {"description": str, "timestamp": float}
@@ -512,12 +509,9 @@ class Orchestrator:
                 return {"status": "interrupted", "reason": "shutdown", "waited": int(time.monotonic() - start)}
 
             if time.time() - self.last_review_time > REVIEW_INTERVAL:
-                self.notification_store.expire_pending()
-                self._tick_cooldowns()
                 patterns = self._detect_patterns()
-                cooldowns = {c: v for c, v in self.proposal_category_cooldowns.items() if v > 0}
                 summary = self.notification_store.get_review_summary(
-                    patterns=patterns, cooldown_categories=cooldowns
+                    patterns=patterns
                 )
                 self.last_review_time = time.time()
                 waited = int(time.monotonic() - start)
@@ -526,10 +520,7 @@ class Orchestrator:
 
             due = self.notification_store.get_due_notification()
             if due:
-                if self.last_fired_notification_id:
-                    self.notification_store.decay_unacknowledged(self.last_fired_notification_id)
                 self.notification_store.record_firing(due["id"])
-                self.last_fired_notification_id = due["id"]
                 waited = int(time.monotonic() - start)
                 info(f"[NOTIF] Due notification fired: {due['id']}")
                 return {"status": "interrupted", "reason": "notification_due", "waited": waited, "user_message": f'[Notification] id={due["id"]} — Time to show: "{due["message"]}"\nAfter showing it (or deferring), call schedule_notification with this ID to set when it fires next.'}
@@ -544,9 +535,6 @@ class Orchestrator:
                     info(f"[NOTIF] Proposal approved: {approved['id']}")
                     user_msg = f'The user approved your notification: "{approved["message"]}"'
                 else:
-                    if self.last_fired_notification_id:
-                        self.notification_store.record_acknowledgment(self.last_fired_notification_id)
-                        self.last_fired_notification_id = None
                     user_msg = "The user pressed a button — they want you to say something!"
 
                 info(f"[WAIT] Interrupted by button press after {waited}s")
@@ -564,7 +552,6 @@ class Orchestrator:
 
     def _tool_propose_notification(self, args: dict) -> dict:
         message = args.get("message", "")
-        category = args.get("category", "misc")
         trigger_type = args.get("trigger_type", "interval")
         trigger_value = args.get("trigger_value", "")
 
@@ -574,15 +561,13 @@ class Orchestrator:
         if len(message) > 100:
             return {"status": "error", "message": "Message too long (max 100 chars)"}
 
-        # Expire any existing pending proposal so the new one can replace it
+        # Reject any existing pending proposal so the new one can replace it
         if self.notification_store.has_pending_proposal():
-            self.notification_store.expire_pending()
-
+            self.notification_store.reject_pending()
 
         notif = self.notification_store.create_proposal(
-            message, category, trigger_type, trigger_value
+            message, trigger_type, trigger_value
         )
-        self.proposal_category_cooldowns[category] = CATEGORY_COOLDOWN_REVIEWS
         info(f"[NOTIF] Proposal created: {notif['id']} — \"{message}\"")
         return {
             "status": "ok",
@@ -652,12 +637,6 @@ class Orchestrator:
 
         return ", ".join(patterns) if patterns else None
 
-    def _tick_cooldowns(self):
-        expired = [c for c, v in self.proposal_category_cooldowns.items() if v <= 0]
-        for c in expired:
-            del self.proposal_category_cooldowns[c]
-        for c in list(self.proposal_category_cooldowns.keys()):
-            self.proposal_category_cooldowns[c] -= 1
 
     def _idle_wait(self):
         for _ in range(IDLE_TIMEOUT):
@@ -678,9 +657,6 @@ class Orchestrator:
                         )
                     info(f"[NOTIF] Proposal approved in idle: {approved['id']}")
                 else:
-                    if self.last_fired_notification_id:
-                        self.notification_store.record_acknowledgment(self.last_fired_notification_id)
-                        self.last_fired_notification_id = None
                     with self.ctx_lock:
                         self.ctx.add_user("The user pressed a button — they want you to say something!")
 
@@ -1015,12 +991,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             if any(kw in msg_lower for kw in REJECTION_KEYWORDS):
                 rejected = orch.notification_store.reject_pending()
                 if rejected:
-                    orch.last_fired_notification_id = None
                     info(f"[NOTIF] Proposal rejected via chat: {rejected['id']}")
-
-        if orch.last_fired_notification_id:
-            orch.notification_store.record_acknowledgment(orch.last_fired_notification_id)
-            orch.last_fired_notification_id = None
 
         with orch.chat_queue_lock:
             orch.chat_queue.append(message)

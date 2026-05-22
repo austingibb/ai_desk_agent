@@ -71,8 +71,6 @@ SSL_KEY_FILE = os.environ.get("SSL_KEY_FILE", os.path.join(PROJECT_DIR, "key.pem
 
 # Notifications
 REVIEW_INTERVAL = int(os.environ.get("REVIEW_INTERVAL", "1800"))  # 30 minutes
-MAX_PROPOSAL_INTERVAL = 7200  # 2 hours — min time between proposals
-CATEGORY_COOLDOWN_REVIEWS = 3  # after proposing in a category, skip it for N reviews
 
 # E-ink display (SSD1680Z, 122x250)
 DISPLAY_WIDTH = 250
@@ -180,10 +178,8 @@ BUTTON NUDGES:
 
 NOTIFICATIONS:
 You can propose, schedule, and delete recurring notifications.
-- Only propose when the review prompt suggests a real pattern.
 - The user approves by pressing a button. They reject via chat ("no", "stop", etc).
-- Check category scores in the review prompt — negative means stop proposing that type. Consider deleting existing notifications in rejected categories.
-- Delete notifications that are no longer useful or the user stopped engaging with. Use delete_notification with the notification's ID.
+- Delete notifications that are no longer useful. Use delete_notification with the notification's ID.
 - Max 100 chars for notification messages. Keep them friendly and casual.
 - NEVER propose about: hygiene, weight, appearance, diet, relationships, or anything judgmental.
 - Good proposals: stretch reminders, break nudges, "it's getting late", weather alerts.
@@ -266,18 +262,13 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "propose_notification",
-            "description": "Propose a recurring notification for the user. They will see it on the display and can approve (button press) or reject (via chat). Only propose when the review prompt suggests a pattern worth acting on.",
+            "description": "Propose a recurring notification for the user. They will see it on the display and can approve (button press) or reject (via chat).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "message": {
                         "type": "string",
                         "description": "Notification text, max 100 chars, e-ink friendly (no emoji).",
-                    },
-                    "category": {
-                        "type": "string",
-                        "enum": ["health", "productivity", "time", "environment", "misc"],
-                        "description": "Category of the notification.",
                     },
                     "trigger_type": {
                         "type": "string",
@@ -289,7 +280,7 @@ TOOL_DEFINITIONS = [
                         "description": "For interval: seconds between firings (e.g. '3600'). For time_of_day: 24h time (e.g. '14:30').",
                     },
                 },
-                "required": ["message", "category", "trigger_type", "trigger_value"],
+                "required": ["message", "trigger_type", "trigger_value"],
             },
         },
     },
