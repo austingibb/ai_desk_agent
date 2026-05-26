@@ -55,6 +55,7 @@ def _run_speech(text: str):
     text = _sanitize(text)
     if not text:
         return
+    proc = None
     try:
         resp = requests.post(
             PIPER_HTTP_URL,

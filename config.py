@@ -20,6 +20,8 @@ VISION_BASE_URL = os.environ.get("VISION_BASE_URL", "http://localhost:8081/v1")
 VISION_MODEL = os.environ.get("VISION_MODEL", "gemma-4-31B-it-UD-Q4_K_XL.gguf")
 VISION_API_KEY = os.environ.get("VISION_API_KEY", "")
 VISION_POLL_INTERVAL = int(os.environ.get("VISION_POLL_INTERVAL", "180"))  # 3 min
+MOTION_POLL_INTERVAL = float(os.environ.get("MOTION_POLL_INTERVAL", "2.0"))  # seconds between lores captures
+CHILL_TIMEOUT = int(os.environ.get("CHILL_TIMEOUT", "300"))  # 5 min no motion → chill mode
 VISION_PROMPT_BASE = (
     "Describe what you see in this photo briefly. "
     "Focus on: who/what is in the room, what they're doing, lighting, "

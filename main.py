@@ -9,6 +9,7 @@ import json
 import secrets
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
 import requests
 from config import (
     PROJECT_DIR,
@@ -33,6 +34,8 @@ from config import (
     LLM_ESTIMATED_MAX_TOKENS,
     ENABLE_CAMERA,
     VISION_POLL_INTERVAL,
+    MOTION_POLL_INTERVAL,
+    CHILL_TIMEOUT,
     VISION_REQUESTS_FILE,
     SCENE_RMS_THRESHOLD,
     SCENE_PCT_THRESHOLD,
@@ -90,6 +93,8 @@ class Orchestrator:
         # Vision background thread state
         self.latest_scene = None  # {"description": str, "timestamp": float}
         self.scene_lock = threading.Lock()
+        self.motion_event = threading.Event()
+        self.motion_description = ""
         self.scene_detector = SceneChangeDetector(
             rms_threshold=SCENE_RMS_THRESHOLD,
             pct_threshold=SCENE_PCT_THRESHOLD,
@@ -442,59 +447,95 @@ class Orchestrator:
             except Exception:
                 pass
 
+    def _interruptible_sleep(self, seconds):
+        """Sleep for up to `seconds`, checking self.running each second."""
+        for _ in range(int(seconds)):
+            if not self.running:
+                return
+            time.sleep(1)
+
     def _start_vision_loop(self):
+        from PIL import Image as _Image
+
         def loop():
-            info(f"[VISION] Background thread started (interval={VISION_POLL_INTERVAL}s)")
+            mode = "chill"
+            last_vision_time = 0.0
+            last_motion_time = 0.0
+            info(f"[VISION] Motion loop started (poll={MOTION_POLL_INTERVAL}s, "
+                 f"vision_cooldown={VISION_POLL_INTERVAL}s, chill_timeout={CHILL_TIMEOUT}s)")
+
             while self.running:
+                # Fast tier: cheap lores capture for motion detection
                 try:
-                    jpeg_bytes, photo_uri = self.camera.capture()
+                    gray = self.camera.capture_lores()
                 except Exception as e:
-                    info(f"[VISION] Camera error: {e}")
-                    for _ in range(VISION_POLL_INTERVAL):
-                        if not self.running:
-                            return
-                        time.sleep(1)
+                    info(f"[VISION] Lores capture error: {e}")
+                    self._interruptible_sleep(10)
                     continue
 
-                self._save_debug_image(jpeg_bytes)
+                pil = _Image.fromarray(gray.astype(int).clip(0, 255).astype('uint8'), mode="L")
+                result = self.scene_detector.check(pil)
 
-                # Check if scene changed before expensive vision call
-                from PIL import Image
-                import io
-                img = Image.open(io.BytesIO(jpeg_bytes))
-                result = self.scene_detector.check(img)
-                info(f"[VISION] Change detection: {result['reason']} "
-                     f"(rms={result['rms']:.1f}, pct={result['pct_changed']:.3f}, "
-                     f"shift={result['shift']})")
+                now = time.time()
 
                 if result["changed"]:
-                    try:
-                        description = self.vision.describe(photo_uri)
-                    except Exception as e:
-                        info(f"[VISION] Describe error: {e}")
-                        for _ in range(VISION_POLL_INTERVAL):
-                            if not self.running:
-                                return
-                            time.sleep(1)
-                        continue
-                    if description:
-                        scene = {"description": description, "timestamp": time.time()}
-                        with self.scene_lock:
-                            self.latest_scene = scene
-                        info(f"[VISION] Scene updated: {description[:100]}...")
-                    else:
-                        info("[VISION] Got empty description from vision model, skipping")
-                else:
-                    info("[VISION] Scene unchanged, skipping vision model call")
+                    last_motion_time = now
+                    info(f"[VISION] Motion detected ({mode}): {result['reason']} "
+                         f"(rms={result['rms']:.1f}, pct={result['pct_changed']:.3f}, "
+                         f"shift={result['shift']})")
 
-                for _ in range(VISION_POLL_INTERVAL):
-                    if not self.running:
-                        return
-                    time.sleep(1)
-            info("[VISION] Background thread stopped")
+                    if mode == "chill":
+                        # First motion after quiet period: immediate capture + notify agent
+                        mode = "active"
+                        info("[VISION] Entering active mode (was chill)")
+                        self._do_vision_capture(notify_agent=True)
+                        last_vision_time = time.time()
+                    elif now - last_vision_time >= VISION_POLL_INTERVAL:
+                        # Active mode but cooldown elapsed: refresh vision
+                        self._do_vision_capture(notify_agent=False)
+                        last_vision_time = time.time()
+                else:
+                    # No motion
+                    if mode == "active" and now - last_motion_time > CHILL_TIMEOUT:
+                        mode = "chill"
+                        info("[VISION] Entering chill mode (no motion for "
+                             f"{CHILL_TIMEOUT}s)")
+
+                self._interruptible_sleep(MOTION_POLL_INTERVAL)
+
+            info("[VISION] Motion loop stopped")
 
         t = threading.Thread(target=loop, daemon=True)
         t.start()
+
+    def _do_vision_capture(self, notify_agent=False):
+        """Full-res capture + vision model describe. Optionally interrupt the agent."""
+        try:
+            jpeg_bytes, photo_uri = self.camera.capture()
+        except Exception as e:
+            info(f"[VISION] Full capture error: {e}")
+            return
+
+        self._save_debug_image(jpeg_bytes)
+
+        try:
+            description = self.vision.describe(photo_uri)
+        except Exception as e:
+            info(f"[VISION] Describe error: {e}")
+            return
+
+        if not description:
+            info("[VISION] Empty description, skipping")
+            return
+
+        scene = {"description": description, "timestamp": time.time()}
+        with self.scene_lock:
+            self.latest_scene = scene
+        info(f"[VISION] Scene updated: {description[:100]}...")
+
+        if notify_agent:
+            self.motion_description = description
+            self.motion_event.set()
 
     def _tool_update_display(self, args: dict, speak: bool = True) -> dict:
         text = args.get("text", "")
@@ -549,6 +590,14 @@ class Orchestrator:
                 waited = int(time.monotonic() - start)
                 info(f"[WAIT] Interrupted by chat message after {waited}s")
                 return {"status": "interrupted", "reason": "chat_message", "waited": waited}
+
+            if self.motion_event.is_set():
+                self.motion_event.clear()
+                waited = int(time.monotonic() - start)
+                desc = self.motion_description or "Something moved"
+                info(f"[WAIT] Interrupted by motion after {waited}s")
+                return {"status": "interrupted", "reason": "motion_detected", "waited": waited,
+                        "user_message": f"Motion detected in the room! Here's what the camera sees: {desc}"}
 
             if not self.running:
                 return {"status": "interrupted", "reason": "shutdown", "waited": int(time.monotonic() - start)}
@@ -690,6 +739,13 @@ class Orchestrator:
             if self.chat_event.is_set():
                 self.chat_event.clear()
                 return
+            if self.motion_event.is_set():
+                self.motion_event.clear()
+                desc = self.motion_description or "Something moved"
+                with self.ctx_lock:
+                    self.ctx.add_user(f"Motion detected in the room! Here's what the camera sees: {desc}")
+                info("[IDLE] Interrupted by motion")
+                return
             result = http_get("/buttons/state", timeout=2)
             if result.get("button"):
                 http_post("/buttons/reset", {}, timeout=5)
@@ -722,7 +778,9 @@ class Orchestrator:
         ChatHandler.orchestrator = self
         ChatHandler.session_token = self.session_token
         ChatHandler.use_https = CHAT_USE_HTTPS
-        server = HTTPServer(("0.0.0.0", CHAT_SERVER_PORT), ChatHandler)
+        class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+            daemon_threads = True
+        server = ThreadedHTTPServer(("0.0.0.0", CHAT_SERVER_PORT), ChatHandler)
         if CHAT_USE_HTTPS:
             import ssl
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
