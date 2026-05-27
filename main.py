@@ -104,6 +104,7 @@ class Orchestrator:
             pct_threshold=SCENE_PCT_THRESHOLD,
             max_stale_seconds=SCENE_MAX_STALE_SECONDS,
         ) if ENABLE_CAMERA else None
+        self.vision_mode = "chill"  # "chill" when no motion, "active" when motion detected
         self.vision_requests_shown = False  # tracks if we've shown existing requests this turn
 
         # Chat auth — persist session token across restarts
@@ -215,7 +216,6 @@ class Orchestrator:
                 try:
                     with self.ctx_lock:
                         self.ctx.check_compact(self.ai)
-                        self.ctx.check_merge_summaries(self.ai)
                 except LLMError as e:
                     info(f"[LLM] Compaction failed during token overflow: {e}")
                 with self.ctx_lock:
@@ -236,7 +236,6 @@ class Orchestrator:
                     try:
                         with self.ctx_lock:
                             self.ctx.check_compact(self.ai)
-                            self.ctx.check_merge_summaries(self.ai)
                     except LLMError as ce:
                         info(f"[LLM] Compaction failed during overflow: {ce}")
                     time.sleep(1)
@@ -339,7 +338,10 @@ class Orchestrator:
             with self.ctx_lock:
                 try:
                     self.ctx.check_compact(self.ai)
-                    self.ctx.check_merge_summaries(self.ai)
+                    # Only merge summaries when user is away (chill mode) to avoid
+                    # blocking the agent loop with back-to-back LLM calls
+                    if self.vision_mode == "chill" or not ENABLE_CAMERA:
+                        self.ctx.check_merge_summaries(self.ai)
                 except LLMError as e:
                     info(f"[LLM] Compaction failed: {e}")
 
@@ -549,6 +551,7 @@ class Orchestrator:
                     if mode == "chill":
                         # First motion after quiet period: immediate capture + notify agent
                         mode = "active"
+                        self.vision_mode = "active"
                         info("[VISION] Entering active mode (was chill)")
                         self._do_vision_capture(notify_agent=True)
                         last_vision_time = time.time()
@@ -560,6 +563,7 @@ class Orchestrator:
                     # No motion
                     if mode == "active" and now - last_motion_time > CHILL_TIMEOUT:
                         mode = "chill"
+                        self.vision_mode = "chill"
                         info("[VISION] Entering chill mode (no motion for "
                              f"{CHILL_TIMEOUT}s)")
 

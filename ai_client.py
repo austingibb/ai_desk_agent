@@ -201,7 +201,7 @@ class AIClient:
         if "choices" not in resp:
             info(f"[LLM] _merge_call: no 'choices' in response. Keys: {list(resp.keys())}. Body: {json.dumps(resp)[:300]}")
             return "", "error"
-        choice = data["choices"][0]
+        choice = resp["choices"][0]
         finish = choice.get("finish_reason", "unknown")
         content = choice["message"].get("content")
         if not content:
