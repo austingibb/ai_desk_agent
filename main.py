@@ -44,7 +44,7 @@ from config import (
 from notifications import NotificationStore
 from context import Context
 from camera import Camera
-from ai_client import AIClient, VisionClient
+from ai_client import AIClient, LLMError, VisionClient
 from mcp_client import MCPClient
 from scene_change import SceneChangeDetector
 from sounds import play as play_sound
@@ -89,6 +89,10 @@ class Orchestrator:
         self.notification_store = NotificationStore()
         self.last_review_time = time.time()
         self.active_notification = None  # {"id": str, "message": str, "remaining": int}
+
+        # LLM error backoff state
+        self._llm_failures = 0
+        self._last_llm_fail = 0.0
 
         # Vision background thread state
         self.latest_scene = None  # {"description": str, "timestamp": float}
@@ -169,6 +173,12 @@ class Orchestrator:
         while self.running:
             try:
                 self._turn()
+            except LLMError as e:
+                info(f"[FATAL] Unhandled LLM error: {e}")
+                self._llm_failures += 1
+                delay = self._llm_backoff_seconds()
+                info(f"[FATAL] Backing off for {delay}s")
+                time.sleep(delay)
             except Exception as e:
                 info(f"[ERROR] {e}")
                 time.sleep(5)
@@ -202,9 +212,12 @@ class Orchestrator:
             estimated = msg_tokens + estimate_tool_tokens(tools) + len(POLICY_REMINDER) // 4
             if estimated > LLM_ESTIMATED_MAX_TOKENS:
                 info(f"[LLM] Token estimate {estimated} exceeds limit {LLM_ESTIMATED_MAX_TOKENS}, compacting...")
-                with self.ctx_lock:
-                    self.ctx.check_compact(self.ai)
-                    self.ctx.check_merge_summaries(self.ai)
+                try:
+                    with self.ctx_lock:
+                        self.ctx.check_compact(self.ai)
+                        self.ctx.check_merge_summaries(self.ai)
+                except LLMError as e:
+                    info(f"[LLM] Compaction failed during token overflow: {e}")
                 with self.ctx_lock:
                     messages = self.ctx.get_messages()
                     msg_tokens = self.ctx.total_tokens()
@@ -215,20 +228,52 @@ class Orchestrator:
             play_sound("thinking")
             try:
                 response = self.ai.chat_with_tools(messages, tools)
-            except Exception as e:
+            except LLMError as e:
+                recoverable = e.status_code >= 500 or e.status_code == 429
                 err_str = str(e)
                 if "exceed_context_size_error" in err_str or "exceeds the available context size" in err_str:
                     info(f"[LLM] Context overflow detected, triggering compaction...")
-                    with self.ctx_lock:
-                        self.ctx.check_compact(self.ai)
-                        self.ctx.check_merge_summaries(self.ai)
+                    try:
+                        with self.ctx_lock:
+                            self.ctx.check_compact(self.ai)
+                            self.ctx.check_merge_summaries(self.ai)
+                    except LLMError as ce:
+                        info(f"[LLM] Compaction failed during overflow: {ce}")
                     time.sleep(1)
                     continue
-                info(f"[LLM] Error: {e}")
-                with self.ctx_lock:
-                    self.ctx.add_user("Something went wrong. Continue the rhythm — what's your next action?")
+                if not recoverable:
+                    info(f"[LLM] Non-recoverable error (HTTP {e.status_code}), backing off: {e}")
+                    self._llm_failures += 1
+                    self._last_llm_fail = time.time()
+                    delay = self._llm_backoff_seconds()
+                    info(f"[LLM] Backing off for {delay}s ({self._llm_failures} consecutive failures)")
+                    self._display_error(f"LLM API error ({e.status_code}). Retrying in {delay // 60}m...")
+                    time.sleep(delay)
+                    continue
+                else:
+                    info(f"[LLM] Recoverable error (HTTP {e.status_code}), backing off: {e}")
+                    self._llm_failures += 1
+                    self._last_llm_fail = time.time()
+                    delay = min(self._llm_backoff_seconds(), 120)  # cap transient retries at 2min
+                    info(f"[LLM] Backing off for {delay}s ({self._llm_failures} consecutive failures)")
+                    time.sleep(delay)
+                    continue
+            except (requests.Timeout, requests.ConnectionError) as e:
+                info(f"[LLM] Network error: {e}")
+                self._llm_failures += 1
+                self._last_llm_fail = time.time()
+                delay = min(self._llm_backoff_seconds(), 120)
+                info(f"[LLM] Backing off for {delay}s")
+                time.sleep(delay)
+                continue
+            except Exception as e:
+                info(f"[LLM] Unexpected error: {e}")
+                self._llm_failures += 1
+                self._last_llm_fail = time.time()
                 time.sleep(5)
                 continue
+
+            self._llm_failures = 0
 
             with self.ctx_lock:
                 self.ctx.add_assistant(response)
@@ -292,8 +337,25 @@ class Orchestrator:
                         self.ctx.add_user(msg)
 
             with self.ctx_lock:
-                self.ctx.check_compact(self.ai)
-                self.ctx.check_merge_summaries(self.ai)
+                try:
+                    self.ctx.check_compact(self.ai)
+                    self.ctx.check_merge_summaries(self.ai)
+                except LLMError as e:
+                    info(f"[LLM] Compaction failed: {e}")
+
+    def _llm_backoff_seconds(self) -> int:
+        n = max(self._llm_failures - 1, 0)
+        return min(30 * (2 ** n), 1800)
+
+    def _display_error(self, msg: str):
+        try:
+            requests.post(
+                f"{DISPLAY_SERVER_URL}/display",
+                json={"text": msg},
+                timeout=5,
+            )
+        except Exception:
+            pass
 
     def _execute_tool(self, name: str, args: dict) -> dict:
         if name == "take_photo":

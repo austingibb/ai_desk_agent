@@ -21,6 +21,27 @@ from config import (
     TOKEN_ESTIMATE_DIVISOR,
 )
 
+
+class LLMError(Exception):
+    """LLM API error with HTTP status code for classification."""
+    def __init__(self, status_code: int, message: str):
+        self.status_code = status_code
+        super().__init__(message)
+
+
+def _is_recoverable(status: int) -> bool:
+    return status >= 500 or status == 429
+
+
+def _api_call(url: str, headers: dict, payload: dict, timeout: int, caller: str = "") -> dict:
+    resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+    if not resp.ok:
+        body = resp.text[:500]
+        status = resp.status_code
+        info(f"[LLM] {caller}{status} error: {body}")
+        raise LLMError(status, f"{status} HTTP error from LLM API")
+    return resp.json()
+
 # Gemma4 can leak control tokens like <|"|> into output
 _TOKEN_JUNK_RE = re.compile(r"<\|[\"']{1,3}\|?>")
 
@@ -61,17 +82,13 @@ class AIClient:
         if tools:
             payload["tools"] = tools
 
-        resp = requests.post(
+        data = _api_call(
             f"{self.base_url}/chat/completions",
-            headers=self._headers,
-            json=payload,
-            timeout=LLM_TIMEOUT,
+            self._headers,
+            payload,
+            LLM_TIMEOUT,
+            caller="chat_with_tools: ",
         )
-        if not resp.ok:
-            body = resp.text[:500]
-            info(f"[LLM] {resp.status_code} error: {body}")
-            resp.raise_for_status()
-        data = resp.json()
         choice = data["choices"][0]
         msg = choice.get("message", {})
 
@@ -134,14 +151,14 @@ class AIClient:
             "max_tokens": LLM_MAX_TOKENS_COMPACT,
             "temperature": 0.3,
         }
-        resp = requests.post(
+        resp = _api_call(
             f"{self.base_url}/chat/completions",
-            headers=self._headers,
-            json=payload,
-            timeout=LLM_TIMEOUT,
+            self._headers,
+            payload,
+            LLM_TIMEOUT,
+            caller="compact: ",
         )
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"].strip()
+        return resp["choices"][0]["message"]["content"].strip()
 
     def merge_summaries(self, summaries_text: str) -> list:
         """Merge summaries using DeepSeek. Single call — DeepSeek v4 Pro output is 384K tokens."""
@@ -174,18 +191,15 @@ class AIClient:
             "max_tokens": 40960,
             "temperature": 0.3,
         }
-        resp = requests.post(
+        resp = _api_call(
             f"{self.base_url}/chat/completions",
-            headers=self._headers,
-            json=payload,
-            timeout=300,
+            self._headers,
+            payload,
+            300,
+            caller="_merge_call: ",
         )
-        if not resp.ok:
-            info(f"[LLM] _merge_call: {resp.status_code} error: {resp.text[:300]}")
-            resp.raise_for_status()
-        data = resp.json()
-        if "choices" not in data:
-            info(f"[LLM] _merge_call: no 'choices' in response. Keys: {list(data.keys())}. Body: {json.dumps(data)[:300]}")
+        if "choices" not in resp:
+            info(f"[LLM] _merge_call: no 'choices' in response. Keys: {list(resp.keys())}. Body: {json.dumps(resp)[:300]}")
             return "", "error"
         choice = data["choices"][0]
         finish = choice.get("finish_reason", "unknown")
