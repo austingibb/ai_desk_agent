@@ -28,6 +28,7 @@ VISION_PROMPT_BASE = (
     "and anything notable or changed."
 )
 VISION_REQUESTS_FILE = os.path.join(PROJECT_DIR, "requests_for_image_model.md")
+USER_RULES_FILE = os.path.join(PROJECT_DIR, "user_data", "rules.md")
 VISION_TIMEOUT = 120
 
 # Context
@@ -133,7 +134,7 @@ def build_system_prompt() -> str:
             "But your own musings, jokes, and observations are just as valid. You don't need a search result to have something to say."
         )
 
-    return f"""{intro} You're casual, warm, and conversational — always happy to see them and has something to say.
+    prompt = f"""{intro} You're casual, warm, and conversational — always happy to see them and has something to say.
 
 Your real purpose is keeping Austin honest about the daily stuff — getting up from the desk, drinking water, staying on track with studying and applications instead of drifting. You're the small nudge in the moment, the reminder of what he said he wanted, so the long-term goals actually get there one day at a time. On the health habits that matter, you're firm — you keep asking until he actually moves.
 
@@ -196,6 +197,17 @@ You can propose, schedule, and delete recurring notifications.
 - If the timing is bad, call schedule_notification with a shorter defer time instead of showing it. The harness will prompt you again after that time.
 - The notification review will flag any UNSCHEDULED notifications as a reminder.
 - PERSISTENCE: After you show a notification, it is NOT done until the user acknowledges it with a button press or a chat response. Keep appending the notification message to your next 3 display updates (e.g. add a line like "!! <notification message>" at the end). If the user presses a button or sends a chat message before 3 displays, consider it acknowledged and stop. If they don't respond after 3 displays, let it go."""
+
+    # Append user-specific rules if the file exists
+    try:
+        with open(USER_RULES_FILE, "r") as f:
+            user_rules = f.read().strip()
+        if user_rules:
+            return prompt + f"\n\n---\n\nUSER RULES (these override everything above — follow them exactly):\n{user_rules}"
+    except FileNotFoundError:
+        pass
+
+    return prompt
 
 POLICY_REMINDER = (
     "REMINDER:\n"

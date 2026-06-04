@@ -6,3 +6,4 @@ venv/
 debug_images/*
 context.json
 notifications.json
+user_data/
