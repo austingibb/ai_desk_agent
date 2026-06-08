@@ -141,7 +141,7 @@ SSL_KEY_FILE=/home/user/.config/certs/<pi5-ip>+1-key.pem
 ### Pi 5 (orchestrator)
 
 ```bash
-cd ~/ai_eink
+cd ~/ai_desk_agent
 pip install -r requirements.txt
 sudo systemctl enable --now ai-eink
 ```
@@ -149,7 +149,7 @@ sudo systemctl enable --now ai-eink
 ### Pi Zero 2W (display)
 
 ```bash
-cd ~/ai_eink
+cd ~/ai_desk_agent
 pip install -r requirements-display.txt
 sudo systemctl enable --now display-server
 ```
@@ -157,8 +157,8 @@ sudo systemctl enable --now display-server
 ### Quick deploy (from dev machine)
 
 ```bash
-ssh user@<pi5-ip> 'cd ~/ai_eink && git pull && sudo systemctl restart ai-eink'
-ssh user@<pizero-ip> 'cd ~/ai_eink && git pull && sudo systemctl restart display-server'
+ssh user@<pi5-ip> 'cd ~/ai_desk_agent && git pull && sudo systemctl restart ai-eink'
+ssh user@<pizero-ip> 'cd ~/ai_desk_agent && git pull && sudo systemctl restart display-server'
 ```
 
 ### Watching logs

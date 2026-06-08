@@ -6,8 +6,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=austingibb
-WorkingDirectory=/home/austingibb/ai_eink
-ExecStart=/home/austingibb/ai_eink/venv/bin/python display_server.py
+WorkingDirectory=/home/austingibb/ai_desk_agent
+ExecStart=/home/austingibb/ai_desk_agent/venv/bin/python display_server.py
 Restart=always
 RestartSec=10
 StandardOutput=journal

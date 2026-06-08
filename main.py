@@ -1176,7 +1176,7 @@ class ChatHandler(BaseHTTPRequestHandler):
 
 
 def main():
-    logger.VERBOSE_LOG = "/home/austingibb/ai_eink/verbose.log"
+    logger.VERBOSE_LOG = "/home/austingibb/ai_desk_agent/verbose.log"
     orch = Orchestrator()
     try:
         orch.run()

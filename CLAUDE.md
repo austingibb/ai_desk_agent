@@ -163,8 +163,8 @@ Web UI on `:8080`. Password-protected login with session cookie. Supports option
 
 **Deploy**: Commit + push, then SSH to each Pi and pull + restart services:
 ```bash
-ssh user@<pi5-ip> 'cd ~/ai_eink && git pull && sudo systemctl restart ai-eink'
-ssh user@<pizero-ip> 'cd ~/ai_eink && git pull && sudo systemctl restart display-server'
+ssh user@<pi5-ip> 'cd ~/ai_desk_agent && git pull && sudo systemctl restart ai-eink'
+ssh user@<pizero-ip> 'cd ~/ai_desk_agent && git pull && sudo systemctl restart display-server'
 ```
 
 **Watch logs**: `ssh user@<pi5-ip> 'sudo journalctl -u ai-eink -f'`

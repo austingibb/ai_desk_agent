@@ -6,9 +6,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=austingibb
-WorkingDirectory=/home/austingibb/ai_eink
+WorkingDirectory=/home/austingibb/ai_desk_agent
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/home/austingibb/ai_eink/venv/bin/python main.py
+ExecStart=/home/austingibb/ai_desk_agent/venv/bin/python main.py
 Restart=always
 RestartSec=10
 StandardOutput=journal
