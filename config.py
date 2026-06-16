@@ -88,6 +88,11 @@ PIN_NO = 6
 CAMERA_WIDTH = 2304
 CAMERA_HEIGHT = 1296
 JPEG_QUALITY = 50
+# Rotate the captured image to compensate for physical camera mounting.
+# Degrees counterclockwise (PIL convention). Device is rotated 90° CCW; the
+# raw frame comes out 90° CW, so rotate -90 (i.e. 90° CW) to bring the scene
+# back upright. Verified against a debug frame. Override with CAMERA_ROTATION.
+CAMERA_ROTATION = int(os.environ.get("CAMERA_ROTATION", "-90"))
 ENABLE_CAMERA = os.environ.get("ENABLE_CAMERA", "1") == "1"
 
 # Scene change detection — skip vision model when nothing changed

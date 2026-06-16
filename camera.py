@@ -6,7 +6,7 @@ import threading
 import numpy as np
 from PIL import Image
 from picamera2 import Picamera2
-from config import CAMERA_WIDTH, CAMERA_HEIGHT, JPEG_QUALITY
+from config import CAMERA_WIDTH, CAMERA_HEIGHT, JPEG_QUALITY, CAMERA_ROTATION
 
 LORES_SIZE = (160, 120)
 
@@ -28,6 +28,10 @@ class Camera:
             try:
                 arr = request.make_array("main")
                 img = Image.fromarray(arr)
+                # Correct for physical camera rotation (PIL rotates CCW for
+                # positive angles); expand so the full frame is preserved
+                if CAMERA_ROTATION % 360:
+                    img = img.rotate(CAMERA_ROTATION, expand=True)
                 # Downscale to 640px wide for LLM, preserving aspect ratio
                 if img.width > 640:
                     ratio = 640 / img.width
