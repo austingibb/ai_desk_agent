@@ -1,185 +1,86 @@
-# AI E-Ink Assistant
+# AI Roommate
 
-This is an independent AI assistant powered by two Raspberry Pis. It observes the room, reflects on the screen, and talks to you. The advanced model on OpenRouter is powering the mind, while the local Gemma 4 is handling the visual perception.
+An autonomous AI agent that lives on a Raspberry Pi in your room. It watches what's going on through a camera, talks to you through an e-ink display and web chat, and speaks out loud via text-to-speech. It's not a voice assistant you summon — it runs on its own, observing the room and deciding when to chime in.
 
-But that's just the tip of the iceberg. The true objective here is ensuring that you stick to your promises when it comes to the everyday things: taking breaks from the desk, hydrating yourself, studying, and doing chores instead of procrastinating. It's the little push that makes sure the larger goals come through eventually.
+The real point: keeping you honest about the small daily stuff. Getting up from the desk, drinking water, staying on track with studying instead of drifting. It's the friend who actually remembers what you said you'd do and holds you to it.
+
+## How it works
+
+The system uses a **two-model architecture** split across three devices:
+
+- **DeepSeek on OpenRouter** is the brain. It handles all reasoning, tool calling, conversation, and decisions. It's text-only — it never sees images directly.
+- **Gemma 4 31B running locally on llama.cpp** handles vision. A background thread captures photos every ~3 minutes, sends them to Gemma for a text description, and caches the result. When the brain wants to "see" the room, it gets this cached description instantly.
+- **Piper TTS** (optional) gives it a voice. The AI's display messages are spoken aloud through a Bluetooth speaker via a local Piper HTTP server.
+
+The brain runs in an autonomous agent loop — there are no timers or hardcoded behaviors. The AI decides what to do and when:
+
+1. Send conversation history + tools to DeepSeek
+2. DeepSeek picks an action: check the room, update the display, send a chat message, search the web, wait, or manage notifications
+3. Execute the tool calls, feed results back
+4. Repeat
+
+When nothing is happening, it idles. When the user interacts (chat message or button press), it wakes up and responds. It manages its own pacing — backing off when ignored, engaging more when in conversation.
 
 ## Hardware
 
 | Device | Role |
 |--------|------|
-| **Pi 5** | Orchestrator — runs the AI agent loop, camera, web chat server. Anything faster than a pi 5 works here. |
-| **Pi Zero 2W** | Display server — drives SSD1680Z e-ink (122×250) + two GPIO buttons |
-| **Any machine with a GPU** | Vision LLM via llama.cpp — runs Gemma 4 31B for photo descriptions. |
+| **Pi 5** (or faster) | Orchestrator — runs the agent loop, camera, TTS, web chat server |
+| **Pi Zero 2W** | Display server — drives the e-ink screen (SSD1680Z, 122x250) and two GPIO buttons |
+| **GPU machine** | Runs llama.cpp serving Gemma 4 31B for vision |
 
-## How it works
+The camera is an IMX708 capturing at full 2304x1296 sensor FOV, downscaled to 640px for the vision model. The e-ink display is small — about 140 characters max — which forces the AI to be concise. Longer thoughts go to the web chat instead.
 
-The AI runs in an autonomous agent loop with a **two-model architecture**:
+## Interaction
 
-- **DeepSeek on OpenRouter** — the brain. Handles reasoning, tool calling, conversation, and notification management. Text-only, no images.
-- **Local Gemma 4 31B** — vision-only. A background thread captures photos every ~3 minutes, sends them to Gemma for a text description, and caches the result.
+**E-ink display** — The AI's primary output. Short, punchy messages like texts from a friend. Updated whenever the AI has something to say.
 
-When the brain calls `take_photo`, it gets the cached description instantly — no round-trip to the vision model during the agent loop. For moments when it genuinely needs to see what's happening *right now* (e.g., "did the user actually do what they said?"), `capture_photo` takes a new photo and blocks until the vision model responds (up to 120s).
+**Web chat** — A password-protected web UI on port 8080. The AI sends longer messages here — real thoughts, stories, detailed replies. The user types back. Optional HTTPS via mkcert.
 
-### Agent loop
+**Physical buttons** — Two GPIO buttons on the display Pi. Press one to nudge the AI into saying something new, or to approve a proposed notification.
 
-1. The orchestrator sends conversation history + tool definitions to DeepSeek
-2. DeepSeek decides what to do: check the room, update the display, wait, search the web, or just idle
-3. Tools are executed and results fed back into the conversation
-4. Repeat — no timers, no hardcoded logic, the AI is in full control
+**Voice** — When TTS is enabled, display messages are spoken aloud through Piper. Non-blocking with interrupt support (new speech cuts off old speech).
 
-### Tools
+**Notifications** — The AI can propose recurring reminders (stretch breaks, "it's getting late"). The user approves with a button press or rejects via chat. A scoring system tracks what the user engages with.
 
-| Tool | What it does |
-|------|-------------|
-| `take_photo` | Returns a cached text description of the room (photos taken automatically every ~3 min). Instant. |
-| `capture_photo` | Takes a new photo and waits for the vision model to describe it. Slow (up to 120s) — use sparingly. |
-| `update_display` | Renders a SHORT message (~140 chars max) on the e-ink display with a timestamp |
-| `send_chat_message` | Sends a LONG message to the chat UI (no length limit). The e-ink shows a short preview. |
-| `wait` | Pauses — polls for button presses, chat messages, notifications, and review intervals |
-| `propose_notification` | Proposes a recurring notification for user approval via button press |
-| `schedule_notification` | Schedules when a notification fires next (interval or deferral) |
-| `delete_notification` | Permanently deletes a notification by ID |
-| `update_vision_requests` | Changes what the vision model looks for when describing the scene |
-| Brave Search tools | Web, local, image, video, news search + summarizer via MCP |
+## Context and memory
 
-### Interaction
+Conversation history persists to disk across restarts. The system auto-compacts at 150 messages, summarizing older messages while keeping the last 30 intact. The AI also has access to Brave Search via MCP for pulling in news, weather, facts, or anything else that sparks a thought.
 
-- **Web chat** — Password-protected login with session cookie (7 day expiry). Type messages to the AI, see its display responses with timestamps. Append-only rendering — scroll up to read history without being dragged to bottom.
-- **Physical buttons** (GPIO 5/6) — Press either button to nudge the AI to say something new, or approve a proposed notification
-- **Brave Search** — MCP integration for web search, news, images, and more
-
-### Chat security
-
-- Password login via `CHAT_PASSWORD` env var (default: `admin`)
-- Random 32-byte session token, stored in an `HttpOnly` cookie
-- Session lasts 7 days before re-login required
-- Optional HTTPS via [mkcert](https://github.com/FiloSottile/mkcert) — set `CHAT_USE_HTTPS=1` and provide `SSL_CERT_FILE` / `SSL_KEY_FILE`
-- Cookie gets `Secure` flag when HTTPS is enabled
-
-### Wait
-
-The AI controls wait duration directly (clamped 10s–30 min). Waits poll for button presses and chat messages every second — any interaction interrupts the wait early.
-
-### Context management
-
-- Conversation persisted to `context.json` across restarts
-- System prompt refreshed from code on every restart
-- Token counting at ~4 chars/token
-- Auto-compaction at 150 messages — summarizes old messages (via DeepSeek or local Gemma) into a summary, keeps last 30
-- OpenRouter message pairing enforced via `_repair_pairing()` — fixes orphan tool results, sandwiched messages, and unmatched tool calls
-
-### Notifications
-
-The AI can propose recurring notifications (stretch reminders, "it's getting late", etc.):
-- Proposed via `propose_notification` tool during periodic reviews
-- User approves via button press, rejects via chat ("no", "stop", etc.)
-- Category scoring tracks what the user likes/dislikes
-- Decay system expires unacknowledged notifications over time
-
-### Sound effects
-
-Non-blocking PulseAudio sounds play on key events: thinking, taking a photo, updating the display, searching, waiting.
+Motion detection adjusts the vision loop — when the room is still for 5 minutes, it enters a chill mode and stops burning compute on unchanged scenes.
 
 ## Configuration
 
-Set via environment variables or `.env` file:
+All configuration is via environment variables or a `.env` file. Key settings:
 
-### Brain LLM (DeepSeek/OpenRouter)
-
-| Variable | Default | Notes |
-|----------|---------|-------|
-| `LLM_BASE_URL` | `https://openrouter.ai/api/v1` | Any OpenAI-compatible API |
-| `LLM_MODEL` | `deepseek/deepseek-chat` | Model name |
-| `LLM_API_KEY` | _(empty)_ | Required for OpenRouter |
-
-### Vision LLM (local Gemma/llama.cpp)
-
-| Variable | Default | Notes |
-|----------|---------|-------|
-| `VISION_BASE_URL` | `http://<llama-server>:8081/v1` | Local llama.cpp server |
-| `VISION_MODEL` | `gemma-4-31B-it-UD-Q4_K_XL.gguf` | Vision model name |
-| `VISION_API_KEY` | _(empty)_ | Optional |
-| `VISION_POLL_INTERVAL` | `180` | Seconds between photo captures |
-
-### Chat & Security
-
-| Variable | Default | Notes |
-|----------|---------|-------|
-| `CHAT_PASSWORD` | `admin` | Password for web chat login |
-| `CHAT_USE_HTTPS` | `0` | Set to `1` to enable HTTPS |
-| `SSL_CERT_FILE` | `cert.pem` (project dir) | Path to TLS certificate |
-| `SSL_KEY_FILE` | `key.pem` (project dir) | Path to TLS private key |
-
-### Other
-
-| Variable | Default | Notes |
-|----------|---------|-------|
-| `ENABLE_CAMERA` | `1` | Set to `0` to disable camera/vision tools |
-| `COMPACT_AFTER_N_MESSAGES` | `150` | Trigger compaction threshold |
-| `REVIEW_INTERVAL` | `1800` | Seconds between notification reviews |
-
-## HTTPS Setup (optional)
-
-```bash
-# On your dev machine (one time)
-brew install mkcert
-sudo mkcert -install
-mkcert <pi5-ip> localhost
-
-# Copy certs to Pi
-rsync -avz <pi5-ip>+1.pem <pi5-ip>+1-key.pem user@<pi5-ip>:~/.config/certs/
-
-# Set in .env on Pi
-CHAT_USE_HTTPS=1
-SSL_CERT_FILE=/home/user/.config/certs/<pi5-ip>+1.pem
-SSL_KEY_FILE=/home/user/.config/certs/<pi5-ip>+1-key.pem
-```
+| Variable | Default | What it does |
+|----------|---------|-------------|
+| `LLM_API_KEY` | _(required)_ | OpenRouter API key |
+| `LLM_MODEL` | `deepseek/deepseek-chat` | Brain model |
+| `VISION_BASE_URL` | `http://localhost:8081/v1` | llama.cpp server URL |
+| `ENABLE_CAMERA` | `1` | Disable camera/vision with `0` |
+| `ENABLE_TTS` | `0` | Enable Piper TTS with `1` |
+| `CHAT_PASSWORD` | `admin` | Web chat login password |
+| `CHAT_USE_HTTPS` | `0` | Enable HTTPS with `1` |
+| `VISION_POLL_INTERVAL` | `180` | Seconds between background photo captures |
+| `COMPACT_AFTER_N_MESSAGES` | `150` | Message count before compaction triggers |
 
 ## Deployment
 
-### Pi 5 (orchestrator)
+Both Pis run systemd services. The orchestrator is `ai-eink` on the Pi 5, and the display server is `display-server` on the Pi Zero 2W. Piper TTS runs as a separate `piper-tts` service.
+
+Deploy by pushing to the repo, then pulling and restarting on each Pi:
 
 ```bash
-cd ~/ai_desk_agent
-pip install -r requirements.txt
-sudo systemctl enable --now ai-eink
-```
+# Pi 5
+ssh user@<pi5-ip> 'cd ~/ai_desk_agent && git pull && sudo systemctl kill ai-eink; sudo systemctl start ai-eink'
 
-### Pi Zero 2W (display)
-
-```bash
-cd ~/ai_desk_agent
-pip install -r requirements-display.txt
-sudo systemctl enable --now display-server
-```
-
-### Quick deploy (from dev machine)
-
-```bash
-ssh user@<pi5-ip> 'cd ~/ai_desk_agent && git pull && sudo systemctl restart ai-eink'
+# Pi Zero 2W
 ssh user@<pizero-ip> 'cd ~/ai_desk_agent && git pull && sudo systemctl restart display-server'
 ```
 
-### Watching logs
+Watch logs with:
 
 ```bash
 ssh user@<pi5-ip> 'sudo journalctl -u ai-eink -f'
 ```
-
-## Files
-
-| File | Runs on | Purpose |
-|------|---------|---------|
-| `main.py` | Pi 5 | Agent loop, tool execution, vision thread, web chat server |
-| `config.py` | Both | All constants, system prompt, tool definitions |
-| `context.py` | Pi 5 | Conversation history, token counting, compaction, pairing repair |
-| `ai_client.py` | Pi 5 | `AIClient` (DeepSeek) + `VisionClient` (local Gemma) |
-| `camera.py` | Pi 5 | Picamera2 capture at 2304×1296 → 640px downscale → base64 JPEG |
-| `mcp_client.py` | Pi 5 | Brave Search MCP integration (JSON-RPC/SSE) |
-| `notifications.py` | Pi 5 | Notification proposals, scoring, decay, review summaries |
-| `sounds.py` | Pi 5 | Non-blocking PulseAudio sound playback |
-| `display_server.py` | Pi Zero 2W | HTTP API on :5050 for display + button monitoring |
-| `display.py` | Pi Zero 2W | SSD1680Z e-ink driver, PIL text rendering |
-| `buttons.py` | Pi Zero 2W | GPIO button reading (gpiod v2) |
-| `requests_for_image_model.md` | Pi 5 | Dynamic instructions for vision model (editable by AI) |
