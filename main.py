@@ -40,11 +40,17 @@ from config import (
     SCENE_RMS_THRESHOLD,
     SCENE_PCT_THRESHOLD,
     SCENE_MAX_STALE_SECONDS,
+    ENABLE_REOLINK,
+    REOLINK_IP,
+    REOLINK_USER,
+    REOLINK_PASSWORD,
+    REOLINK_TIMEOUT,
 )
 from notifications import NotificationStore
 from context import Context
 from camera import Camera
 from ai_client import AIClient, LLMError, VisionClient
+from reolink import ReoLinkCamera
 from mcp_client import MCPClient
 from scene_change import SceneChangeDetector
 from sounds import play as play_sound
@@ -78,6 +84,7 @@ class Orchestrator:
         self.camera = Camera() if ENABLE_CAMERA else None
         self.ai = AIClient()
         self.vision = VisionClient() if ENABLE_CAMERA else None
+        self.reolink = ReoLinkCamera(REOLINK_IP, REOLINK_USER, REOLINK_PASSWORD, REOLINK_TIMEOUT) if ENABLE_REOLINK else None
         self.running = True
         self.last_display_time = 0
         self.chat_event = threading.Event()
@@ -381,6 +388,15 @@ class Orchestrator:
             return self._tool_wait(args)
         elif name == "update_vision_requests":
             return self._tool_update_vision_requests(args)
+        elif name == "take_reolink_photo":
+            if not ENABLE_REOLINK:
+                return {"error": "Reolink camera is disabled."}
+            play_sound("take_photo")
+            return self._tool_take_reolink_photo()
+        elif name == "flash_camera_light":
+            if not ENABLE_REOLINK:
+                return {"error": "Reolink camera is disabled."}
+            return self._tool_flash_camera_light(args)
         elif name == "propose_notification":
             play_sound("update_display")
             return self._tool_propose_notification(args)
@@ -466,6 +482,56 @@ class Orchestrator:
             return {"status": "ok", "message": "Vision requests updated. Changes take effect on the next photo capture."}
         except Exception as e:
             return {"status": "error", "message": f"Failed to write requests file: {e}"}
+
+    def _tool_take_reolink_photo(self) -> dict:
+        if not self.reolink:
+            return {"status": "error", "message": "Reolink camera not initialized"}
+        if not self.vision:
+            return {"status": "error", "message": "Vision model not available (ENABLE_CAMERA=0)"}
+        info("[REOLINK] Capturing snapshot...")
+        try:
+            _, data_uri = self.reolink.capture()
+        except Exception as e:
+            return {"status": "error", "message": f"Reolink capture failed: {e}"}
+        try:
+            description = self.vision.describe(data_uri)
+        except Exception as e:
+            return {"status": "error", "message": f"Vision describe failed: {e}"}
+        if not description:
+            return {"status": "error", "message": "Vision model returned empty description"}
+        captured_at = time.strftime("%-I:%M%p").lower().lstrip("0")
+        info(f"[REOLINK] Scene: {description[:100]}...")
+        return {
+            "status": "ok",
+            "description": description,
+            "captured_at": captured_at,
+            "source": "reolink_security_cam",
+        }
+
+    def _tool_flash_camera_light(self, args: dict) -> dict:
+        if not self.reolink:
+            return {"status": "error", "message": "Reolink camera not initialized"}
+        on = bool(args.get("on", True))
+        brightness = int(args.get("brightness", 100))
+        duration = args.get("duration_seconds")
+        info(f"[REOLINK] Flash light: on={on}, brightness={brightness}, duration={duration}")
+        try:
+            success = self.reolink.set_white_light(on, brightness)
+        except Exception as e:
+            return {"status": "error", "message": f"Failed to control light: {e}"}
+        if not success:
+            return {"status": "error", "message": "Camera returned an error — check credentials or model support"}
+        if on and duration:
+            def turn_off():
+                time.sleep(int(duration))
+                try:
+                    self.reolink.set_white_light(False)
+                    info("[REOLINK] Flash auto-off after duration")
+                except Exception:
+                    pass
+            threading.Thread(target=turn_off, daemon=True).start()
+            return {"status": "ok", "message": f"Light on at {brightness}% — will turn off in {duration}s"}
+        return {"status": "ok", "message": f"Light {'on' if on else 'off'} at {brightness}% brightness"}
 
     def _capture_and_describe(self) -> dict | None:
         """Capture a photo and get a text description from the local vision model."""

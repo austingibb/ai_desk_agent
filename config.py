@@ -84,6 +84,13 @@ ROTATION = 0
 PIN_YES = 5
 PIN_NO = 6
 
+# Reolink security camera
+REOLINK_IP = os.environ.get("REOLINK_IP", "192.168.2.101")
+REOLINK_USER = os.environ.get("REOLINK_USER", "admin")
+REOLINK_PASSWORD = os.environ.get("REOLINK_PASSWORD", "")
+REOLINK_TIMEOUT = int(os.environ.get("REOLINK_TIMEOUT", "10"))
+ENABLE_REOLINK = os.environ.get("ENABLE_REOLINK", "1") == "1"
+
 # Camera — use full sensor FOV to avoid center-crop zoom on IMX708
 CAMERA_WIDTH = 2304
 CAMERA_HEIGHT = 1296
@@ -120,11 +127,20 @@ def build_system_prompt() -> str:
         "- update_vision_requests: Change what the camera looks for when describing the scene. Write instructions to guide the vision model (e.g. 'check if anyone is at the desk', 'note what's on the screen').",
     ]
 
+    reolink_tools = []
+    if ENABLE_REOLINK:
+        reolink_tools = [
+            "- take_reolink_photo: Capture a snapshot from the Reolink security camera — a second viewpoint at a different angle. Use to corroborate what the main camera sees, or check a part of the room the Pi cam can't see. Slow (vision model describes it, up to 120s).",
+            "- flash_camera_light: Control the white LED spotlight on the Reolink camera. Great for waking Austin up in the morning — blast it bright to get his attention. Can also do a quick flash as a signal. Takes optional brightness (0-100) and duration_seconds.",
+        ]
+
     search_ref = "Use these just like take_photo — to find things to talk about."
     toolkit = (
-        "take_photo, capture_photo, and web search are tools in your toolkit — use them when they'd add to the conversation, not because you feel obligated. "
+        "take_photo, capture_photo, take_reolink_photo, and web search are tools in your toolkit — use them when they'd add to the conversation, not because you feel obligated. "
         "take_photo is for quick routine checks (cached, instant). "
         "capture_photo is for moments when you really need to know what's happening RIGHT NOW — like verifying the user followed through on something. It takes up to 2 minutes, so use it sparingly. "
+        "take_reolink_photo gets a second angle from the security camera — useful for corroboration or checking a blind spot. Also slow. "
+        "flash_camera_light is your alarm — use it to wake Austin up in the morning, ideally as part of a scheduled notification. "
         "Search is great for pulling in outside world tidbits. "
         "But your own musings, jokes, and observations are just as valid. You don't need a photo or a search result to have something to say."
     )
@@ -139,12 +155,13 @@ def build_system_prompt() -> str:
             "But your own musings, jokes, and observations are just as valid. You don't need a search result to have something to say."
         )
 
+    all_core_tools = core_tools + reolink_tools
     prompt = f"""{intro} You're casual, warm, and conversational — always happy to see them and has something to say.
 
 Your real purpose is keeping Austin honest about the daily stuff — getting up from the desk, drinking water, staying on track with studying and applications instead of drifting. You're the small nudge in the moment, the reminder of what he said he wanted, so the long-term goals actually get there one day at a time. On the health habits that matter, you're firm — you keep asking until he actually moves.
 
-You have {len(core_tools)} core tools:
-{chr(10).join(core_tools)}
+You have {len(all_core_tools)} core tools:
+{chr(10).join(all_core_tools)}
 
 You also have access to Brave Search tools (brave_web_search, brave_local_search, brave_image_search, brave_video_search, brave_news_search, brave_summarizer). {search_ref} Look up news, facts, jokes, weather, whatever sparks a thought.
 
@@ -380,11 +397,52 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "take_reolink_photo",
+            "description": "Capture a snapshot from the Reolink security camera (second viewpoint, different angle from the main Pi camera). Use to corroborate what the main camera sees, verify details from a different angle, or check a part of the room the Pi cam can't see. Blocks while the vision model describes it (up to 120s).",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "flash_camera_light",
+            "description": "Control the white LED spotlight on the Reolink security camera. Excellent for waking Austin up in the morning — blast it at full brightness to get his attention. Can also be used as a signal or confirmation flash.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "on": {
+                        "type": "boolean",
+                        "description": "True to turn the light on, False to turn it off.",
+                    },
+                    "brightness": {
+                        "type": "integer",
+                        "description": "Brightness 0-100 (default 100 = max). Use lower values for a gentle wake, 100 for a hard alarm.",
+                    },
+                    "duration_seconds": {
+                        "type": "integer",
+                        "description": "If provided, the light turns off automatically after this many seconds. Omit to leave it on/off until another call.",
+                    },
+                },
+                "required": ["on"],
+            },
+        },
+    },
 ]
 
 CAMERA_TOOL_NAMES = {"take_photo", "capture_photo", "update_vision_requests"}
+REOLINK_TOOL_NAMES = {"take_reolink_photo", "flash_camera_light"}
 
 def get_tool_definitions() -> list:
-    if ENABLE_CAMERA:
-        return TOOL_DEFINITIONS
-    return [t for t in TOOL_DEFINITIONS if t["function"]["name"] not in CAMERA_TOOL_NAMES]
+    result = list(TOOL_DEFINITIONS)
+    if not ENABLE_CAMERA:
+        result = [t for t in result if t["function"]["name"] not in CAMERA_TOOL_NAMES]
+    if not ENABLE_REOLINK:
+        result = [t for t in result if t["function"]["name"] not in REOLINK_TOOL_NAMES]
+    return result
