@@ -131,7 +131,7 @@ def build_system_prompt() -> str:
     if ENABLE_REOLINK:
         reolink_tools = [
             "- take_reolink_photo: Capture a snapshot from the Reolink security camera — a second viewpoint at a different angle. Use to corroborate what the main camera sees, or check a part of the room the Pi cam can't see. Slow (vision model describes it, up to 120s).",
-            "- flash_ir_light: Control the IR (infrared) lights on the Reolink camera. 'Open' forces IR on, 'Close' forces off, 'Auto' lets the camera decide. Optional duration_seconds to auto-revert.",
+            "- flash_ir_light: Control the IR (infrared) lights on the Reolink camera. 'Auto' lets the camera decide based on ambient light, 'Off' forces IR off. Optional duration_seconds to auto-revert to Auto.",
             "- flash_camera_light: Control the white LED spotlight on the Reolink camera. Great for waking Austin up in the morning — blast it bright to get his attention. Can also do a quick flash as a signal. Takes optional brightness (0-100) and duration_seconds.",
         ]
 
@@ -420,8 +420,8 @@ TOOL_DEFINITIONS = [
                 "properties": {
                     "state": {
                         "type": "string",
-                        "enum": ["Auto", "Open", "Close"],
-                        "description": "'Open' = force IR on, 'Close' = force IR off, 'Auto' = camera decides.",
+                        "enum": ["Auto", "Off"],
+                        "description": "'Auto' = camera decides based on light level, 'Off' = force IR off (e.g. to avoid IR glow being visible).",
                     },
                     "duration_seconds": {
                         "type": "integer",

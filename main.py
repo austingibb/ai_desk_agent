@@ -524,7 +524,7 @@ class Orchestrator:
             return {"status": "error", "message": f"Failed to control IR light: {e}"}
         if not success:
             return {"status": "error", "message": "Camera returned an error"}
-        if state != "Auto" and duration:
+        if state == "Off" and duration:
             def revert():
                 time.sleep(int(duration))
                 try:
