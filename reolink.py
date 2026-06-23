@@ -25,8 +25,6 @@ class ReoLinkCamera:
         """Capture a JPEG snapshot. Returns (jpeg_bytes, data_uri)."""
         r = requests.get(self._url("/cgi-bin/api.cgi", "Snap"), timeout=self.timeout)
         r.raise_for_status()
-        if b"<" in r.content[:50] or b"{" in r.content[:10]:
-            raise ValueError(f"Camera returned non-image response: {r.content[:200]}")
         jpeg_bytes = r.content
 
         # Downscale to 640px wide so the vision model gets a consistent input size
