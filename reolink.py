@@ -15,23 +15,18 @@ class ReoLinkCamera:
         self.timeout = timeout
         self._base = f"http://{ip}"
 
-    def _auth_params(self, cmd: str) -> dict:
-        return {
-            "cmd": cmd,
-            "rs": secrets.token_hex(8),
-            "user": self.user,
-            "password": self.password,
-            "channel": 0,
-        }
+    def _url(self, path: str, cmd: str, extra: str = "") -> str:
+        # Build URL manually — requests URL-encodes special chars like $ which Reolink rejects
+        rs = secrets.token_hex(8)
+        return (f"{self._base}{path}?cmd={cmd}&rs={rs}"
+                f"&user={self.user}&password={self.password}&channel=0{extra}")
 
     def capture(self) -> tuple:
         """Capture a JPEG snapshot. Returns (jpeg_bytes, data_uri)."""
-        r = requests.get(
-            f"{self._base}/cgi-bin/api.cgi",
-            params=self._auth_params("Snap"),
-            timeout=self.timeout,
-        )
+        r = requests.get(self._url("/cgi-bin/api.cgi", "Snap"), timeout=self.timeout)
         r.raise_for_status()
+        if b"<" in r.content[:50] or b"{" in r.content[:10]:
+            raise ValueError(f"Camera returned non-image response: {r.content[:200]}")
         jpeg_bytes = r.content
 
         # Downscale to 640px wide so the vision model gets a consistent input size
@@ -62,8 +57,7 @@ class ReoLinkCamera:
             }
         }]
         r = requests.post(
-            f"{self._base}/api.cgi",
-            params={"cmd": "SetWhiteLed", "user": self.user, "password": self.password},
+            self._url("/api.cgi", "SetWhiteLed"),
             json=payload,
             timeout=self.timeout,
         )
