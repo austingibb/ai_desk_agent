@@ -131,6 +131,7 @@ def build_system_prompt() -> str:
     if ENABLE_REOLINK:
         reolink_tools = [
             "- take_reolink_photo: Capture a snapshot from the Reolink security camera — a second viewpoint at a different angle. Use to corroborate what the main camera sees, or check a part of the room the Pi cam can't see. Slow (vision model describes it, up to 120s).",
+            "- flash_ir_light: Control the IR (infrared) lights on the Reolink camera. 'Open' forces IR on, 'Close' forces off, 'Auto' lets the camera decide. Optional duration_seconds to auto-revert.",
             "- flash_camera_light: Control the white LED spotlight on the Reolink camera. Great for waking Austin up in the morning — blast it bright to get his attention. Can also do a quick flash as a signal. Takes optional brightness (0-100) and duration_seconds.",
         ]
 
@@ -412,6 +413,28 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
+            "name": "flash_ir_light",
+            "description": "Control the IR (infrared) lights on the Reolink camera. Use 'Open' to force IR on (night vision in the dark), 'Close' to force off, 'Auto' to let the camera decide based on ambient light.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "state": {
+                        "type": "string",
+                        "enum": ["Auto", "Open", "Close"],
+                        "description": "'Open' = force IR on, 'Close' = force IR off, 'Auto' = camera decides.",
+                    },
+                    "duration_seconds": {
+                        "type": "integer",
+                        "description": "If provided, revert to Auto after this many seconds.",
+                    },
+                },
+                "required": ["state"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "flash_camera_light",
             "description": "Control the white LED spotlight on the Reolink security camera. Excellent for waking Austin up in the morning — blast it at full brightness to get his attention. Can also be used as a signal or confirmation flash.",
             "parameters": {
@@ -437,7 +460,7 @@ TOOL_DEFINITIONS = [
 ]
 
 CAMERA_TOOL_NAMES = {"take_photo", "capture_photo", "update_vision_requests"}
-REOLINK_TOOL_NAMES = {"take_reolink_photo", "flash_camera_light"}
+REOLINK_TOOL_NAMES = {"take_reolink_photo", "flash_camera_light", "flash_ir_light"}
 
 def get_tool_definitions() -> list:
     result = list(TOOL_DEFINITIONS)

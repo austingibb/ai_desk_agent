@@ -40,6 +40,22 @@ class ReoLinkCamera:
         data_uri = f"data:image/jpeg;base64,{b64}"
         return jpeg_bytes, data_uri
 
+    def set_ir_light(self, state: str = "Auto") -> bool:
+        """Set IR light state: 'Auto', 'Open' (force on), 'Close' (force off)."""
+        payload = [{
+            "cmd": "SetIrLights",
+            "action": 0,
+            "param": {"IrLights": {"channel": 0, "state": state}}
+        }]
+        r = requests.post(
+            self._url("/api.cgi", "SetIrLights"),
+            json=payload,
+            timeout=self.timeout,
+        )
+        r.raise_for_status()
+        data = r.json()
+        return isinstance(data, list) and data[0].get("code") == 0
+
     def set_white_light(self, on: bool, brightness: int = 100) -> bool:
         """Turn the white LED spotlight on or off. Returns True on success."""
         payload = [{

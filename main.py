@@ -393,6 +393,10 @@ class Orchestrator:
                 return {"error": "Reolink camera is disabled."}
             play_sound("take_photo")
             return self._tool_take_reolink_photo()
+        elif name == "flash_ir_light":
+            if not ENABLE_REOLINK:
+                return {"error": "Reolink camera is disabled."}
+            return self._tool_flash_ir_light(args)
         elif name == "flash_camera_light":
             if not ENABLE_REOLINK:
                 return {"error": "Reolink camera is disabled."}
@@ -507,6 +511,30 @@ class Orchestrator:
             "captured_at": captured_at,
             "source": "reolink_security_cam",
         }
+
+    def _tool_flash_ir_light(self, args: dict) -> dict:
+        if not self.reolink:
+            return {"status": "error", "message": "Reolink camera not initialized"}
+        state = args.get("state", "Auto")
+        duration = args.get("duration_seconds")
+        info(f"[REOLINK] IR light: state={state}, duration={duration}")
+        try:
+            success = self.reolink.set_ir_light(state)
+        except Exception as e:
+            return {"status": "error", "message": f"Failed to control IR light: {e}"}
+        if not success:
+            return {"status": "error", "message": "Camera returned an error"}
+        if state != "Auto" and duration:
+            def revert():
+                time.sleep(int(duration))
+                try:
+                    self.reolink.set_ir_light("Auto")
+                    info("[REOLINK] IR light reverted to Auto")
+                except Exception:
+                    pass
+            threading.Thread(target=revert, daemon=True).start()
+            return {"status": "ok", "message": f"IR light set to {state}, reverting to Auto in {duration}s"}
+        return {"status": "ok", "message": f"IR light set to {state}"}
 
     def _tool_flash_camera_light(self, args: dict) -> dict:
         if not self.reolink:
