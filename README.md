@@ -84,3 +84,7 @@ Watch logs with:
 ```bash
 ssh user@<pi5-ip> 'sudo journalctl -u ai-eink -f'
 ```
+
+## Roadmap
+
+See [improvements/2026-07-10-feature-ideas.md](improvements/2026-07-10-feature-ideas.md) for an evaluation of the project and ten proposed features — durable long-term memory, a generalized habit ledger, a presence timeline, voice input, and more.
