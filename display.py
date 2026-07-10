@@ -31,8 +31,9 @@ class Display:
             rst_pin=rst,
             busy_pin=busy,
         )
-        self.width = DISPLAY_HEIGHT
-        self.height = DISPLAY_WIDTH
+        self.epd.rotation = 1
+        self.width = DISPLAY_WIDTH
+        self.height = DISPLAY_HEIGHT
 
         self.font_bold_lg = self._load_font(FONT_BOLD, 22)
         self.font_bold_md = self._load_font(FONT_BOLD, 16)

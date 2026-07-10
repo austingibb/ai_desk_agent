@@ -3,3 +3,4 @@ adafruit-circuitpython-busdevice
 Adafruit-Blinka
 gpiod
 Pillow
+python-dotenv

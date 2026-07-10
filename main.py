@@ -47,6 +47,9 @@ from config import (
     REOLINK_TIMEOUT,
 )
 from notifications import NotificationStore
+from caffeine import DrinkStore
+from presence import ActiveTracker
+from status_publisher import StatusPublisher
 from context import Context
 from camera import Camera
 from ai_client import AIClient, LLMError, VisionClient
@@ -94,6 +97,9 @@ class Orchestrator:
         self.mcp_tools = []
         self.mcp = None
         self.notification_store = NotificationStore()
+        self.drink_store = DrinkStore()
+        self.presence = ActiveTracker()
+        self.status_publisher = StatusPublisher(self.drink_store, self.presence)
         self.last_review_time = time.time()
         self.active_notification = None  # {"id": str, "message": str, "remaining": int}
 
@@ -113,6 +119,10 @@ class Orchestrator:
         ) if ENABLE_CAMERA else None
         self.vision_mode = "chill"  # "chill" when no motion, "active" when motion detected
         self.vision_requests_shown = False  # tracks if we've shown existing requests this turn
+
+        # Status tracking for chat UI
+        self.status_message = ""
+        self.status_lock = threading.Lock()
 
         # Chat auth — persist session token across restarts
         self._token_file = os.path.join(PROJECT_DIR, ".session_token")
@@ -153,6 +163,7 @@ class Orchestrator:
         info("Init AI client (DeepSeek on OpenRouter)...")
         info("Init vision client (local Gemma)...")
         self._start_chat_server()
+        self.status_publisher.start()
         if ENABLE_CAMERA:
             self._start_vision_loop()
         with self.ctx_lock:
@@ -220,11 +231,15 @@ class Orchestrator:
             estimated = msg_tokens + estimate_tool_tokens(tools) + len(POLICY_REMINDER) // 4
             if estimated > LLM_ESTIMATED_MAX_TOKENS:
                 info(f"[LLM] Token estimate {estimated} exceeds limit {LLM_ESTIMATED_MAX_TOKENS}, compacting...")
+                with self.status_lock:
+                    self.status_message = "Compacting memory..."
                 try:
-                    with self.ctx_lock:
-                        self.ctx.check_compact(self.ai)
+                    self.ctx.check_compact(self.ai, self.ctx_lock)
                 except LLMError as e:
                     info(f"[LLM] Compaction failed during token overflow: {e}")
+                finally:
+                    with self.status_lock:
+                        self.status_message = ""
                 with self.ctx_lock:
                     messages = self.ctx.get_messages()
                     msg_tokens = self.ctx.total_tokens()
@@ -241,8 +256,7 @@ class Orchestrator:
                 if "exceed_context_size_error" in err_str or "exceeds the available context size" in err_str:
                     info(f"[LLM] Context overflow detected, triggering compaction...")
                     try:
-                        with self.ctx_lock:
-                            self.ctx.check_compact(self.ai)
+                        self.ctx.check_compact(self.ai, self.ctx_lock)
                     except LLMError as ce:
                         info(f"[LLM] Compaction failed during overflow: {ce}")
                     time.sleep(1)
@@ -342,15 +356,20 @@ class Orchestrator:
                     for msg in deferred_user_msgs:
                         self.ctx.add_user(msg)
 
-            with self.ctx_lock:
-                try:
-                    self.ctx.check_compact(self.ai)
-                    # Only merge summaries when user is away (chill mode) to avoid
-                    # blocking the agent loop with back-to-back LLM calls
-                    if self.vision_mode == "chill" or not ENABLE_CAMERA:
-                        self.ctx.check_merge_summaries(self.ai)
-                except LLMError as e:
-                    info(f"[LLM] Compaction failed: {e}")
+            try:
+                self.ctx.check_compact(self.ai, self.ctx_lock)
+                # Only merge summaries when user is away (chill mode) to avoid
+                # blocking the agent loop with back-to-back LLM calls
+                if self.vision_mode == "chill" or not ENABLE_CAMERA:
+                    with self.status_lock:
+                        self.status_message = "Merging memory..."
+                    try:
+                        self.ctx.check_merge_summaries(self.ai, self.ctx_lock)
+                    finally:
+                        with self.status_lock:
+                            self.status_message = ""
+            except LLMError as e:
+                info(f"[LLM] Compaction failed: {e}")
 
     def _llm_backoff_seconds(self) -> int:
         n = max(self._llm_failures - 1, 0)
@@ -401,6 +420,8 @@ class Orchestrator:
             if not ENABLE_REOLINK:
                 return {"error": "Reolink camera is disabled."}
             return self._tool_flash_camera_light(args)
+        elif name == "log_drink":
+            return self._tool_log_drink(args)
         elif name == "propose_notification":
             play_sound("update_display")
             return self._tool_propose_notification(args)
@@ -638,6 +659,7 @@ class Orchestrator:
 
                 if result["changed"]:
                     last_motion_time = now
+                    self.presence.touch()
                     info(f"[VISION] Motion detected ({mode}): {result['reason']} "
                          f"(rms={result['rms']:.1f}, pct={result['pct_changed']:.3f}, "
                          f"shift={result['shift']})")
@@ -782,6 +804,7 @@ class Orchestrator:
             result = http_get("/buttons/state", timeout=2)
             if result.get("button"):
                 http_post("/buttons/reset", {}, timeout=5)
+                self.presence.touch()
                 waited = int(time.monotonic() - start)
 
                 if self.notification_store.has_pending_proposal():
@@ -803,6 +826,34 @@ class Orchestrator:
 
         info(f"[WAIT] Completed {seconds}s.")
         return {"status": "ok", "waited": seconds}
+
+    def _tool_log_drink(self, args: dict) -> dict:
+        try:
+            mg = int(args.get("mg", 0))
+        except (TypeError, ValueError):
+            return {"status": "error", "message": "mg must be an integer"}
+        label = str(args.get("label", "")).strip()
+        if not label:
+            return {"status": "error", "message": "No label provided"}
+        if mg <= 0:
+            return {"status": "error", "message": "mg must be a positive integer"}
+        if mg > 1000:
+            return {"status": "error", "message": "mg looks too high for one drink — double-check the dose"}
+        try:
+            minutes_ago = max(0, int(args.get("minutes_ago") or 0))
+        except (TypeError, ValueError):
+            minutes_ago = 0
+
+        entry = self.drink_store.add(mg, label, minutes_ago)
+        self.status_publisher.trigger()
+        at_str = time.strftime("%-I:%M%p", time.localtime(entry["t"] / 1000)).lower().lstrip("0")
+        total = self.drink_store.total_recent_mg()
+        info(f"[CAFFEINE] Logged {mg}mg ({label}) at {at_str} — 24h total {total}mg")
+        published = "Feed updates within a minute." if self.status_publisher.enabled else "Note: AWS publishing is not configured, logged locally only."
+        return {
+            "status": "ok",
+            "message": f"Logged {mg}mg ({label}) at {at_str}. Last 24h total: {total}mg. {published}",
+        }
 
     def _tool_propose_notification(self, args: dict) -> dict:
         message = args.get("message", "")
@@ -909,6 +960,7 @@ class Orchestrator:
             result = http_get("/buttons/state", timeout=2)
             if result.get("button"):
                 http_post("/buttons/reset", {}, timeout=5)
+                self.presence.touch()
 
                 if self.notification_store.has_pending_proposal():
                     approved = self.notification_store.approve_pending()
@@ -955,6 +1007,7 @@ class Orchestrator:
     def cleanup(self):
         info("Cleaning up...")
         tts_interrupt()
+        self.status_publisher.stop()
         with self.ctx_lock:
             self.ctx.save()
         try:
@@ -975,6 +1028,8 @@ CHAT_HTML = """<!DOCTYPE html>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:system-ui,sans-serif;background:#1a1a2e;color:#e0e0e0;height:100vh;display:flex;flex-direction:column}
+#status-banner{display:none;background:#e94560;color:#fff;text-align:center;padding:8px;font-size:13px;font-weight:600}
+#status-banner.show{display:block}
 #messages{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:12px}
 .msg-wrap{display:flex;flex-direction:column;max-width:80%}
 .msg-wrap.user{align-self:flex-end}
@@ -987,13 +1042,19 @@ body{font-family:system-ui,sans-serif;background:#1a1a2e;color:#e0e0e0;height:10
 #form{display:flex;gap:8px;padding:12px;background:#16213e;border-top:1px solid #0f3460}
 #input{flex:1;padding:10px 14px;border:1px solid #0f3460;border-radius:20px;background:#1a1a2e;color:#e0e0e0;font-size:15px;outline:none}
 #input:focus{border-color:#e94560}
+#input:disabled{opacity:0.4;cursor:not-allowed}
 button{padding:10px 20px;background:#e94560;color:#fff;border:none;border-radius:20px;font-size:15px;cursor:pointer}
 button:hover{background:#c73e54}
+button:disabled{opacity:0.4;cursor:not-allowed}
 </style></head><body>
+<div id="status-banner"></div>
 <div id="messages"></div>
 <form id="form"><input id="input" placeholder="Say something..." autocomplete="off"><button type="submit">Send</button></form>
 <script>
 const div=document.getElementById('messages');
+const banner=document.getElementById('status-banner');
+const form=document.getElementById('form');
+const input=document.getElementById('input');
 const rendered=new Set();
 let initialized=false;
 
@@ -1009,10 +1070,25 @@ function atBottom(){
   return div.scrollHeight-div.scrollTop-div.clientHeight<60;
 }
 
+function updateStatus(status){
+  if(status){
+    banner.textContent=status;
+    banner.classList.add('show');
+    input.disabled=true;
+    form.querySelector('button').disabled=true;
+  }else{
+    banner.classList.remove('show');
+    input.disabled=false;
+    form.querySelector('button').disabled=false;
+  }
+}
+
 async function refresh(){
   try{
     const r=await fetch('/chat');
-    const msgs=await r.json();
+    const data=await r.json();
+    updateStatus(data.status||'');
+    const msgs=data.messages||[];
     if(!initialized){
       div.innerHTML=msgs.map(msgHTML).join('');
       msgs.forEach(m=>rendered.add(msgKey(m)));
@@ -1035,12 +1111,11 @@ async function refresh(){
 }
 setInterval(refresh,2000);
 refresh();
-document.getElementById('form').onsubmit=async e=>{
+form.onsubmit=async e=>{
   e.preventDefault();
-  const inp=document.getElementById('input');
-  const msg=inp.value.trim();
+  const msg=input.value.trim();
   if(!msg)return;
-  inp.value='';
+  input.value='';
   const resp=await fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg})});
   if(resp.ok){
     setTimeout(refresh,500);
@@ -1227,9 +1302,11 @@ class ChatHandler(BaseHTTPRequestHandler):
                         except (json.JSONDecodeError, KeyError):
                             pass
 
-        # Return last 50 messages
+          # Return last 50 messages
         filtered = filtered[-50:]
-        data = json.dumps(filtered).encode()
+        with orch.status_lock:
+            status = orch.status_message
+        data = json.dumps({"messages": filtered, "status": status}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
@@ -1259,6 +1336,7 @@ class ChatHandler(BaseHTTPRequestHandler):
         with orch.chat_queue_lock:
             orch.chat_queue.append(message)
         orch.chat_event.set()
+        orch.presence.touch()
         info(f"[CHAT] User message: {message[:100]}")
 
         data = json.dumps({"status": "ok"}).encode()

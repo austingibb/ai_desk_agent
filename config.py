@@ -16,8 +16,8 @@ LLM_MAX_TOKENS_COMPACT = int(os.environ.get("LLM_MAX_TOKENS_COMPACT", "64000"))
 LLM_TIMEOUT = 120
 
 # Vision LLM — local Gemma on llama.cpp
-VISION_BASE_URL = os.environ.get("VISION_BASE_URL", "http://localhost:8081/v1")
-VISION_MODEL = os.environ.get("VISION_MODEL", "gemma-4-31B-it-UD-Q4_K_XL.gguf")
+VISION_BASE_URL = os.environ.get("VISION_BASE_URL", "http://localhost:8080/v1")
+VISION_MODEL = os.environ.get("VISION_MODEL", "Qwen3.6-27B-UD-Q4_K_XL.gguf")
 VISION_API_KEY = os.environ.get("VISION_API_KEY", "")
 VISION_POLL_INTERVAL = int(os.environ.get("VISION_POLL_INTERVAL", "180"))  # 3 min
 MOTION_POLL_INTERVAL = float(os.environ.get("MOTION_POLL_INTERVAL", "2.0"))  # seconds between lores captures
@@ -107,6 +107,17 @@ SCENE_RMS_THRESHOLD = float(os.environ.get("SCENE_RMS_THRESHOLD", "12.0"))
 SCENE_PCT_THRESHOLD = float(os.environ.get("SCENE_PCT_THRESHOLD", "0.05"))
 SCENE_MAX_STALE_SECONDS = int(os.environ.get("SCENE_MAX_STALE_SECONDS", "1800"))
 
+# Caffeine status feed — public JSON published to S3, read by aarg.dev.
+# NOTE: the feed (desk presence + drink log) is world-readable when enabled.
+# AWS creds (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_DEFAULT_REGION)
+# live only in the Pi 5's .env — boto3 reads them from the environment.
+ENABLE_STATUS_PUBLISH = os.environ.get("ENABLE_STATUS_PUBLISH", "1") == "1"
+STATUS_S3_BUCKET = os.environ.get("STATUS_S3_BUCKET", "")
+STATUS_S3_KEY = os.environ.get("STATUS_S3_KEY", "caffeine.json")
+STATUS_PUBLISH_INTERVAL = int(os.environ.get("STATUS_PUBLISH_INTERVAL", "45"))  # heartbeat seconds
+ACTIVE_WINDOW_SECONDS = int(os.environ.get("ACTIVE_WINDOW_SECONDS", "300"))  # 5 min no activity -> away
+DRINK_RETENTION_SECONDS = 86400  # drinks older than 24h are pruned from the feed
+
 # TTS (Piper HTTP server)
 ENABLE_TTS = os.environ.get("ENABLE_TTS", "0") == "1"
 PIPER_HTTP_URL = os.environ.get("PIPER_HTTP_URL", "http://localhost:5000")
@@ -125,6 +136,7 @@ def build_system_prompt() -> str:
         "- wait: Pause for a number of seconds. If a button is pressed or someone types a message during your wait, you'll be notified early. A button press means the user wants you to say something — respond with a fresh thought or topic.",
         "- propose_notification, schedule_notification, delete_notification: Manage recurring notifications — propose new ones, schedule when they fire, or delete ones that are no longer useful.",
         "- update_vision_requests: Change what the camera looks for when describing the scene. Write instructions to guide the vision model (e.g. 'check if anyone is at the desk', 'note what's on the screen').",
+        "- log_drink: Log a caffeinated drink Austin had. Feeds his public caffeine tracker on his website.",
     ]
 
     reolink_tools = []
@@ -219,7 +231,15 @@ You can propose, schedule, and delete recurring notifications.
 - After showing a notification, you MUST call schedule_notification to set when it fires next (e.g. 1800 for 30min). If you don't, it won't fire again until you schedule it.
 - If the timing is bad, call schedule_notification with a shorter defer time instead of showing it. The harness will prompt you again after that time.
 - The notification review will flag any UNSCHEDULED notifications as a reminder.
-- PERSISTENCE: After you show a notification, it is NOT done until the user acknowledges it with a button press or a chat response. Keep appending the notification message to your next 3 display updates (e.g. add a line like "!! <notification message>" at the end). If the user presses a button or sends a chat message before 3 displays, consider it acknowledged and stop. If they don't respond after 3 displays, let it go."""
+- PERSISTENCE: After you show a notification, it is NOT done until the user acknowledges it with a button press or a chat response. Keep appending the notification message to your next 3 display updates (e.g. add a line like "!! <notification message>" at the end). If the user presses a button or sends a chat message before 3 displays, consider it acknowledged and stop. If they don't respond after 3 displays, let it go.
+
+CAFFEINE TRACKING:
+You keep Austin's caffeine log. It feeds a public chart on his website, so log accurately.
+- When he mentions a drink in chat ("just had a coffee", "log an espresso", "grabbed a monster an hour ago"), convert it to a dose and call log_drink with mg, a short label, and minutes_ago if it wasn't just now.
+- Reference doses in mg: espresso single 63, espresso double 125, drip coffee 8oz 95, drip coffee 12oz 145, cold brew 16oz 200, black tea 47, green tea 28, matcha 70, red bull 8.4oz 80, monster 16oz 160, cola 12oz 34, decaf 3. If he gives an explicit amount ("about 150mg"), use that instead. If the drink is ambiguous ("a coffee"), assume drip coffee 12oz unless context says otherwise.
+- Before 3pm, keep an eye out: if a photo shows him with a mug, coffee cup, or energy drink and nothing was logged in the last couple hours, casually ask if he wants it logged. In the morning, if he's around and nothing is logged yet, it's fine to ask now and then (roughly hourly at most) whether he's had coffee.
+- NEVER log a drink from camera evidence alone — always get his confirmation in chat first. Only log without asking when he explicitly tells you about a drink.
+- Never log a drink at a future time. Doses are per-drink raw events — don't aggregate or adjust them."""
 
     # Append user-specific rules if the file exists
     try:
@@ -395,6 +415,31 @@ TOOL_DEFINITIONS = [
                     },
                 },
                 "required": ["requests"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "log_drink",
+            "description": "Log a caffeinated drink Austin had. Appends to his public caffeine feed (his website charts it). Convert drink names to mg using the reference table in your instructions, or use an explicit amount if he gives one. Never log from camera evidence without his confirmation.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mg": {
+                        "type": "integer",
+                        "description": "Caffeine dose in milligrams (e.g. espresso single = 63, drip coffee 12oz = 145).",
+                    },
+                    "label": {
+                        "type": "string",
+                        "description": "Short name of the drink, e.g. 'espresso double', 'cold brew 16oz'.",
+                    },
+                    "minutes_ago": {
+                        "type": "integer",
+                        "description": "How many minutes ago he drank it. Omit or 0 if just now.",
+                    },
+                },
+                "required": ["mg", "label"],
             },
         },
     },

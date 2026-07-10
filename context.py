@@ -360,9 +360,10 @@ class Context:
             break
         return i
 
-    def check_compact(self, ai_client):
+    def _prepare_compact(self):
+        """Gather data for compaction. Must be called with lock held. Returns (combined, fallback_summary, system_msg, existing_summaries, end, keep_count, to_compact_len, date_label) or None."""
         if len(self.messages) < COMPACT_AFTER_N_MESSAGES:
-            return
+            return None
 
         system_msg = self.messages[0] if self.messages and self.messages[0]["role"] == "system" else None
         keep_count = KEEP_LAST_N_MESSAGES
@@ -371,11 +372,11 @@ class Context:
         end = len(self.messages) - keep_count
 
         if end <= start:
-            return
+            return None
 
         end = self._find_safe_end(start, end)
         if end <= start:
-            return
+            return None
 
         window = self.messages[start:end]
 
@@ -383,7 +384,7 @@ class Context:
         to_compact = [m for m in window if not self._is_summary(m)]
 
         if not to_compact:
-            return
+            return None
 
         ts_min = min(m.get("_ts", self._now()) for m in to_compact)
         ts_max = max(m.get("_ts", self._now()) for m in to_compact)
@@ -413,23 +414,26 @@ class Context:
             text_parts.append(f"{ts_str} {role}: {content}")
 
         combined = "\n".join(text_parts)
-        try:
-            summary = ai_client.compact(combined)
-        except Exception as e:
-            info(f"[CONTEXT] Compaction LLM call failed: {e}")
-            user_msgs = []
-            for m in to_compact:
-                if m.get("role") == "user" and not m.get("tool_calls"):
-                    content = m.get("content", "")
-                    if isinstance(content, list):
-                        content = " ".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text")
-                    if content and isinstance(content, str) and len(content.strip()) > 0:
-                        user_msgs.append(f"{_ts_fmt(m.get('_ts', 0))} {content.strip()[:300]}")
-            if user_msgs:
-                summary = "COMPACTION FAILED — only user messages preserved:\n" + "\n".join(user_msgs[:30])
-            else:
-                summary = f"Compaction failed for this period — no recoverable content."
 
+        # Fallback summary if the LLM call fails: preserve raw user messages
+        # so they aren't lost when the window is discarded.
+        user_msgs = []
+        for m in to_compact:
+            if m.get("role") == "user" and not m.get("tool_calls"):
+                content = m.get("content", "")
+                if isinstance(content, list):
+                    content = " ".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text")
+                if content and isinstance(content, str) and len(content.strip()) > 0:
+                    user_msgs.append(f"{_ts_fmt(m.get('_ts', 0))} {content.strip()[:300]}")
+        if user_msgs:
+            fallback_summary = "COMPACTION FAILED — only user messages preserved:\n" + "\n".join(user_msgs[:30])
+        else:
+            fallback_summary = "Compaction failed for this period — no recoverable content."
+
+        return (combined, fallback_summary, system_msg, existing_summaries, end, keep_count, len(to_compact), date_label)
+
+    def _apply_compact(self, system_msg, existing_summaries, end, keep_count, to_compact_len, date_label, summary):
+        """Apply compaction result. Must be called with lock held."""
         new_messages = []
         if system_msg:
             new_messages.append(system_msg)
@@ -441,27 +445,50 @@ class Context:
         })
         new_messages.extend(self.messages[end:])
         self.messages = new_messages
-        info(f"[CONTEXT] Compacted {len(to_compact)} messages into 1 summary (~{len(summary)} chars) [{date_label}], "
+        info(f"[CONTEXT] Compacted {to_compact_len} messages into 1 summary (~{len(summary)} chars) [{date_label}], "
               f"preserved {len(existing_summaries)} prior summaries, keeping last {keep_count}")
 
-    def check_merge_summaries(self, ai_client):
-        """Merge, condense, or drop old compaction summaries. Only touches summary messages."""
-        summary_items = [(i, m) for i, m in enumerate(self.messages) if self._is_summary(m)]
-        if len(summary_items) <= MERGE_SUMMARIES_AFTER:
+    def check_compact(self, ai_client, ctx_lock=None):
+        """Compact context. Does not hold lock during LLM call."""
+        if ctx_lock:
+            with ctx_lock:
+                prep = self._prepare_compact()
+        else:
+            prep = self._prepare_compact()
+
+        if prep is None:
             return
 
-        summaries_text = "\n\n---\n\n".join(m["content"] for _, m in summary_items)
-        info(f"[CONTEXT] Merging {len(summary_items)} summaries ({len(summaries_text)} total chars)...")
+        combined, fallback_summary, system_msg, existing_summaries, end, keep_count, to_compact_len, date_label = prep
 
         try:
-            merged = ai_client.merge_summaries(summaries_text)
+            summary = ai_client.compact(combined)
         except Exception as e:
-            info(f"[CONTEXT] Summary merge error: {e}")
-            return
+            info(f"[CONTEXT] Compaction LLM call failed: {e}")
+            summary = fallback_summary
 
+        if ctx_lock:
+            with ctx_lock:
+                self._apply_compact(system_msg, existing_summaries, end, keep_count, to_compact_len, date_label, summary)
+        else:
+            self._apply_compact(system_msg, existing_summaries, end, keep_count, to_compact_len, date_label, summary)
+
+    def _prepare_merge_summaries(self):
+        """Gather data for merge. Must be called with lock held. Returns summaries_text or None."""
+        summary_items = [(i, m) for i, m in enumerate(self.messages) if self._is_summary(m)]
+        if len(summary_items) <= MERGE_SUMMARIES_AFTER:
+            return None
+        summaries_text = "\n\n---\n\n".join(m["content"] for _, m in summary_items)
+        info(f"[CONTEXT] Merging {len(summary_items)} summaries ({len(summaries_text)} total chars)...")
+        return summaries_text
+
+    def _apply_merge_summaries(self, summaries_text, merged):
+        """Apply merge result. Must be called with lock held."""
         if not merged:
             info(f"[CONTEXT] Summary merge produced no summaries, skipping. Input was {len(summaries_text)} chars")
             return
+
+        summary_items = [(i, m) for i, m in enumerate(self.messages) if self._is_summary(m)]
         if len(merged) >= len(summary_items):
             info(f"[CONTEXT] Summary merge produced {len(merged)} summaries (was {len(summary_items)}), skipping — not an improvement")
             return
@@ -486,6 +513,29 @@ class Context:
         self.messages = non_summaries
         info(f"[CONTEXT] Merged {len(summary_items)} summaries into {len(new_summaries)}")
         self.save()
+
+    def check_merge_summaries(self, ai_client, ctx_lock=None):
+        """Merge, condense, or drop old compaction summaries. Only touches summary messages. Does not hold lock during LLM call."""
+        if ctx_lock:
+            with ctx_lock:
+                summaries_text = self._prepare_merge_summaries()
+        else:
+            summaries_text = self._prepare_merge_summaries()
+
+        if summaries_text is None:
+            return
+
+        try:
+            merged = ai_client.merge_summaries(summaries_text)
+        except Exception as e:
+            info(f"[CONTEXT] Summary merge error: {e}")
+            return
+
+        if ctx_lock:
+            with ctx_lock:
+                self._apply_merge_summaries(summaries_text, merged)
+        else:
+            self._apply_merge_summaries(summaries_text, merged)
 
     def _is_image_message(self, msg: dict) -> bool:
         content = msg.get("content", "")
