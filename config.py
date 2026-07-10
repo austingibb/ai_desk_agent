@@ -137,6 +137,8 @@ def build_system_prompt() -> str:
         "- propose_notification, schedule_notification, delete_notification: Manage recurring notifications — propose new ones, schedule when they fire, or delete ones that are no longer useful.",
         "- update_vision_requests: Change what the camera looks for when describing the scene. Write instructions to guide the vision model (e.g. 'check if anyone is at the desk', 'note what's on the screen').",
         "- log_drink: Log a caffeinated drink Austin had. Feeds his public caffeine tracker on his website.",
+        "- list_drinks: Show recent caffeine drinks with their timestamps, doses, and labels.",
+        "- edit_drink: Fix a previously logged drink by its timestamp_ms. Use when Austin corrects a drink — first call list_drinks, then edit the right entry.",
     ]
 
     reolink_tools = []
@@ -239,7 +241,9 @@ You keep Austin's caffeine log. It feeds a public chart on his website, so log a
 - Reference doses in mg: espresso single 63, espresso double 125, drip coffee 8oz 95, drip coffee 12oz 145, cold brew 16oz 200, black tea 47, green tea 28, matcha 70, red bull 8.4oz 80, monster 16oz 160, cola 12oz 34, decaf 3. If he gives an explicit amount ("about 150mg"), use that instead. If the drink is ambiguous ("a coffee"), assume drip coffee 12oz unless context says otherwise.
 - Before 3pm, keep an eye out: if a photo shows him with a mug, coffee cup, or energy drink and nothing was logged in the last couple hours, casually ask if he wants it logged. In the morning, if he's around and nothing is logged yet, it's fine to ask now and then (roughly hourly at most) whether he's had coffee.
 - NEVER log a drink from camera evidence alone — always get his confirmation in chat first. Only log without asking when he explicitly tells you about a drink.
-- Never log a drink at a future time. Doses are per-drink raw events — don't aggregate or adjust them."""
+- Never log a drink at a future time. Doses are per-drink raw events — don't aggregate or adjust them.
+- When Austin says something like "that was actually..." or "change that to..." about a drink, he's correcting a previous entry. Call list_drinks to find the right timestamp_ms, then call edit_drink with the corrected mg and/or label.
+- Don't ask for confirmation before editing. If he says he had a double not a single, just fix it."""
 
     # Append user-specific rules if the file exists
     try:
@@ -440,6 +444,43 @@ TOOL_DEFINITIONS = [
                     },
                 },
                 "required": ["mg", "label"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_drinks",
+            "description": "List recent caffeine drinks. Returns up to the last 20 drinks with their timestamp_ms, mg, and label. Use this when the user asks what they've had, or before editing a drink to find the right timestamp.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_drink",
+            "description": "Edit a previously logged caffeine drink by its timestamp_ms (the unique identifier from list_drinks). Update the mg and/or label. Use this when the user corrects a drink entry — first call list_drinks to find the right timestamp, then edit.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "timestamp_ms": {
+                        "type": "integer",
+                        "description": "The timestamp_ms of the drink to edit, from list_drinks.",
+                    },
+                    "mg": {
+                        "type": "integer",
+                        "description": "Updated caffeine dose in milligrams. Omit to leave unchanged.",
+                    },
+                    "label": {
+                        "type": "string",
+                        "description": "Updated label for the drink. Omit to leave unchanged.",
+                    },
+                },
+                "required": ["timestamp_ms"],
             },
         },
     },

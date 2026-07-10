@@ -89,3 +89,20 @@ class DrinkStore:
         with self._lock:
             self._prune()
             return sum(d["mg"] for d in self.drinks)
+
+    def list_recent(self, n: int = 20) -> list:
+        with self._lock:
+            self._prune()
+            return list(self.drinks[-n:])
+
+    def edit(self, timestamp_ms: int, mg: int | None = None, label: str | None = None) -> dict | None:
+        with self._lock:
+            for d in self.drinks:
+                if d.get("t") == timestamp_ms:
+                    if mg is not None:
+                        d["mg"] = int(mg)
+                    if label is not None:
+                        d["label"] = label
+                    self._save()
+                    return dict(d)
+        return None

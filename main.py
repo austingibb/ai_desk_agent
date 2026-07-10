@@ -422,6 +422,10 @@ class Orchestrator:
             return self._tool_flash_camera_light(args)
         elif name == "log_drink":
             return self._tool_log_drink(args)
+        elif name == "list_drinks":
+            return self._tool_list_drinks(args)
+        elif name == "edit_drink":
+            return self._tool_edit_drink(args)
         elif name == "propose_notification":
             play_sound("update_display")
             return self._tool_propose_notification(args)
@@ -853,6 +857,48 @@ class Orchestrator:
         return {
             "status": "ok",
             "message": f"Logged {mg}mg ({label}) at {at_str}. Last 24h total: {total}mg. {published}",
+        }
+
+    def _tool_list_drinks(self, args: dict) -> dict:
+        drinks = self.drink_store.list_recent()
+        if not drinks:
+            return {"status": "ok", "message": "No drinks logged yet.", "drinks": []}
+        formatted = []
+        for d in drinks:
+            t = d.get("t", 0)
+            ts_str = time.strftime("%-I:%M%p %a %b %d", time.localtime(t / 1000)).lower().lstrip("0")
+            formatted.append({
+                "timestamp_ms": t,
+                "time": ts_str,
+                "mg": d.get("mg", 0),
+                "label": d.get("label", ""),
+            })
+        return {"status": "ok", "drinks": formatted}
+
+    def _tool_edit_drink(self, args: dict) -> dict:
+        timestamp_ms = int(args.get("timestamp_ms", 0))
+        if not timestamp_ms:
+            return {"status": "error", "message": "timestamp_ms is required"}
+        mg = args.get("mg")
+        if mg is not None:
+            try:
+                mg = int(mg)
+            except (TypeError, ValueError):
+                return {"status": "error", "message": "mg must be an integer"}
+        label = args.get("label")
+        if label is not None:
+            label = str(label).strip()
+        if mg is None and label is None:
+            return {"status": "error", "message": "Provide at least one of mg or label to update"}
+
+        updated = self.drink_store.edit(timestamp_ms, mg=mg, label=label)
+        if not updated:
+            return {"status": "error", "message": f"No drink found with timestamp_ms={timestamp_ms}. Try list_drinks to find the right timestamp."}
+        self.status_publisher.trigger()
+        return {
+            "status": "ok",
+            "message": f"Updated drink: {updated['mg']}mg {updated['label']}",
+            "drink": updated,
         }
 
     def _tool_propose_notification(self, args: dict) -> dict:
