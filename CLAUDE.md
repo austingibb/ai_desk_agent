@@ -12,7 +12,7 @@ Pi 5 — Orchestrator (main.py)
 ├── mcp_client.py    → Brave Search MCP integration (JSON-RPC over SSE/HTTP)
 ├── sounds.py        → Non-blocking PulseAudio playback for tool events
 ├── notifications.py → Notification proposals, approval/rejection, decay scoring
-├── caffeine.py      → Append-only drink log (drinks.json, 24h retention)
+├── caffeine.py      → Append-only drink log (drinks.json, 30-day retention)
 ├── presence.py      → ActiveTracker: at-desk boolean from motion/chat/button activity
 ├── status_publisher.py → Publishes {active, drinks} JSON to public S3 for aarg.dev
 └── chat server :8080  → Web UI for user to type messages
@@ -67,7 +67,7 @@ When DeepSeek calls `take_photo`, it gets the cached description instantly.
 | `camera.py` | Picamera2 capture at 2304×1296, downscale to 640px, JPEG encode |
 | `mcp_client.py` | Brave Search MCP client (JSON-RPC over SSE/HTTP) |
 | `notifications.py` | Notification proposals, approval/rejection, decay scoring, review summaries |
-| `caffeine.py` | `DrinkStore` — append-only caffeine log in `drinks.json`, pruned to 24h |
+| `caffeine.py` | `DrinkStore` — append-only caffeine log in `drinks.json`, pruned to 30 days |
 | `presence.py` | `ActiveTracker` — "at desk" boolean (activity within 5 min, debounced) |
 | `status_publisher.py` | Daemon thread uploading `{active, drinks}` to S3 (public feed for aarg.dev) |
 | `setup-aws.sh` | One-time bootstrap: bucket, public-read policy, CORS, scoped IAM user |
@@ -133,7 +133,7 @@ All in `config.py`. Key constants:
 - `STATUS_S3_KEY` (`caffeine.json`), `STATUS_PUBLISH_INTERVAL` (45s heartbeat)
 - `ACTIVE_WINDOW_SECONDS` (300) — no motion/chat/button for 5 min → `active: false`
 - AWS creds via `.env` on Pi 5 only (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION`); boto3 reads them from the environment. One-time infra via `setup-aws.sh`.
-- Feed shape (aarg.dev depends on it): `{"active": bool, "drinks": [{"t": epoch_ms, "mg": int}]}` — raw events, no decay math, 24h retention, never future timestamps.
+- Feed shape (aarg.dev depends on it): `{"active": bool, "drinks": [{"t": epoch_ms, "mg": int}]}` — raw events, no decay math, 30-day retention, never future timestamps.
 
 ### Hardware
 - `ENABLE_CAMERA` (env, default 1) — toggle camera/vision features

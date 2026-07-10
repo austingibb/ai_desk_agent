@@ -1158,6 +1158,7 @@ NUDGE_PREFIXES = [
     "[Notification review]",
     "[Notification]",
     "The user approved your notification:",
+    "Motion detected in the room!",
 ]
 
 

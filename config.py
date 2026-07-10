@@ -116,7 +116,7 @@ STATUS_S3_BUCKET = os.environ.get("STATUS_S3_BUCKET", "")
 STATUS_S3_KEY = os.environ.get("STATUS_S3_KEY", "caffeine.json")
 STATUS_PUBLISH_INTERVAL = int(os.environ.get("STATUS_PUBLISH_INTERVAL", "45"))  # heartbeat seconds
 ACTIVE_WINDOW_SECONDS = int(os.environ.get("ACTIVE_WINDOW_SECONDS", "300"))  # 5 min no activity -> away
-DRINK_RETENTION_SECONDS = 86400  # drinks older than 24h are pruned from the feed
+DRINK_RETENTION_SECONDS = 2592000  # drinks older than 30 days are pruned from the feed
 
 # TTS (Piper HTTP server)
 ENABLE_TTS = os.environ.get("ENABLE_TTS", "0") == "1"

@@ -1,4 +1,4 @@
-"""Caffeine drink store — append-only log of drinks, pruned to the last 24h."""
+"""Caffeine drink store — append-only log of drinks, pruned to the retention window (30 days)."""
 
 import os
 import json
@@ -16,19 +16,38 @@ class DrinkStore:
         self._lock = threading.Lock()
         self._load()
 
-    def _load(self):
+    def _read_file(self) -> list:
+        """Current on-disk drinks; [] if the file is missing or unreadable."""
         if not os.path.exists(DRINKS_FILE):
-            return
+            return []
         try:
             with open(DRINKS_FILE, "r") as f:
-                data = json.load(f)
-            self.drinks = data.get("drinks", [])
-            info(f"[CAFFEINE] Loaded {len(self.drinks)} drinks")
-            self._prune()
+                return json.load(f).get("drinks", [])
         except Exception as e:
-            info(f"[CAFFEINE] Load error: {e}")
+            info(f"[CAFFEINE] Read error: {e}")
+            return []
+
+    def _load(self):
+        self.drinks = self._read_file()
+        if self.drinks:
+            info(f"[CAFFEINE] Loaded {len(self.drinks)} drinks")
+        self._prune()
 
     def _save(self):
+        """Re-read the file and merge before writing, so entries added to
+        drinks.json outside this process are never clobbered. Entries older
+        than the retention window are not merged back."""
+        cutoff_ms = int((_time.time() - DRINK_RETENTION_SECONDS) * 1000)
+        seen = {(d.get("t"), d.get("mg"), d.get("label")) for d in self.drinks}
+        external = [
+            d for d in self._read_file()
+            if d.get("t", 0) >= cutoff_ms
+            and (d.get("t"), d.get("mg"), d.get("label")) not in seen
+        ]
+        if external:
+            info(f"[CAFFEINE] Merged {len(external)} external entries from disk")
+            self.drinks.extend(external)
+            self.drinks.sort(key=lambda d: d.get("t", 0))
         try:
             with open(DRINKS_FILE, "w") as f:
                 json.dump({"drinks": self.drinks}, f)
@@ -42,7 +61,7 @@ class DrinkStore:
         self.drinks = [d for d in self.drinks if d.get("t", 0) >= cutoff_ms]
         removed = before - len(self.drinks)
         if removed:
-            info(f"[CAFFEINE] Pruned {removed} drinks older than 24h")
+            info(f"[CAFFEINE] Pruned {removed} drinks past retention")
             self._save()
 
     def add(self, mg: int, label: str, minutes_ago: int = 0) -> dict:
@@ -57,7 +76,7 @@ class DrinkStore:
         return entry
 
     def get_feed_drinks(self) -> list:
-        """Drinks for the public feed: last 24h only, t/mg fields only, ascending."""
+        """Drinks for the public feed: retention window only, t/mg fields only, ascending."""
         now_ms = int(_time.time() * 1000)
         with self._lock:
             self._prune()
