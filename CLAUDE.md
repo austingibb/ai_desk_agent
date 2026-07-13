@@ -136,9 +136,23 @@ All in `config.py`. Key constants:
 - Feed shape (aarg.dev depends on it): `{"active": bool, "drinks": [{"t": epoch_ms, "mg": int}]}` — raw events, no decay math, 30-day retention, never future timestamps.
 
 ### Hardware
+- `ENABLE_DISPLAY` (env, default 1) — toggle the e-ink display + GPIO buttons. `0` = chat-only mode (see below)
 - `ENABLE_CAMERA` (env, default 1) — toggle camera/vision features
 - `CAMERA_WIDTH` (2304), `CAMERA_HEIGHT` (1296) — full sensor FOV
 - `DISPLAY_WIDTH` (250), `DISPLAY_HEIGHT` (122) — SSD1680Z e-ink
+
+## Chat-Only Mode (ENABLE_DISPLAY=0)
+
+Runs the whole agent on one ordinary machine — no e-ink, no GPIO buttons, no Pi Zero display server. The web chat (`:8080`) becomes the sole interface. `ENABLE_DISPLAY`, `ENABLE_CAMERA`, and `ENABLE_TTS` are independent, so a laptop can run camera-on/display-off.
+
+What changes when `ENABLE_DISPLAY=0`:
+- `update_display` and the `send_chat_message` preview skip the display-server HTTP call. Display-bound text still surfaces in the chat UI (the chat renders `update_display`/`send_chat_message` tool calls), so nothing is lost.
+- No button polling in `_tool_wait` / `_idle_wait` (`http_get("/buttons/state")` is gated behind `ENABLE_DISPLAY`). `_display_error` is a no-op.
+- Notification approval falls back to chat: an affirmative chat reply ("yes"/"sure"/"go for it") to a pending proposal approves it (`_post_message` in `main.py`); rejection keywords still reject. Button approval is unchanged in display mode.
+- `build_system_prompt()` swaps e-ink/button wording for chat wording (intro, RHYTHM, output-style, notifications sections).
+- The agent loop, tools, compaction, and notification proposals behave identically.
+
+The camera (`picamera2`) and `scene_change` (`numpy`) imports are lazy (only loaded when `ENABLE_CAMERA=1`), so `python main.py` runs on a laptop without Pi libraries. Laptop deps: `requirements-chat.txt`. Quickstart: clone, `pip install -r requirements-chat.txt`, set `LLM_API_KEY` + `ENABLE_DISPLAY=0` (+ `ENABLE_CAMERA=0`), `python main.py`.
 
 ## Context & Compaction
 

@@ -4,6 +4,25 @@ An autonomous AI agent that lives on a Raspberry Pi in your room. It watches wha
 
 The real point: keeping you honest about the small daily stuff. Getting up from the desk, drinking water, staying on track with studying instead of drifting. It's the friend who actually remembers what you said you'd do and holds you to it.
 
+## Run it on your laptop (chat-only)
+
+No Raspberry Pis, no e-ink screen, no wiring. In **chat-only mode** the agent runs on a single ordinary machine and uses the web chat as its only interface. The full agent loop, tools, compaction, and notifications all work the same — the only difference is that messages the AI would put on the e-ink display go to the chat instead, and notification approvals happen in chat (there are no buttons to press).
+
+```bash
+git clone <this-repo> ai_roommate && cd ai_roommate
+pip install -r requirements-chat.txt
+
+export LLM_API_KEY=sk-or-...   # your OpenRouter key
+export ENABLE_DISPLAY=0        # no e-ink / buttons — route everything to chat
+export ENABLE_CAMERA=0         # no webcam / vision server
+
+python main.py
+```
+
+Then open `http://localhost:8080`, log in with the chat password (`CHAT_PASSWORD`, default `admin`), and start talking. To approve a proposed notification, just reply affirmatively in chat ("yes", "sure", "go for it"); reply "no" / "stop" to reject.
+
+`ENABLE_DISPLAY`, `ENABLE_CAMERA`, and `ENABLE_TTS` toggle independently, so a laptop with a webcam and a reachable vision server can run camera-on, display-off with `ENABLE_CAMERA=1` (add `numpy` — see `requirements-chat.txt`). Set `ENABLE_REOLINK=0` unless you have the security camera on your network.
+
 ## How it works
 
 The system uses a **two-model architecture** split across three devices:
@@ -41,7 +60,7 @@ The camera is an IMX708 capturing at full 2304x1296 sensor FOV, downscaled to 64
 
 **Voice** — When TTS is enabled, display messages are spoken aloud through Piper. Non-blocking with interrupt support (new speech cuts off old speech).
 
-**Notifications** — The AI can propose recurring reminders (stretch breaks, "it's getting late"). The user approves with a button press or rejects via chat. A scoring system tracks what the user engages with.
+**Notifications** — The AI can propose recurring reminders (stretch breaks, "it's getting late"). The user approves with a button press or rejects via chat. In chat-only mode (`ENABLE_DISPLAY=0`) there are no buttons, so both approval and rejection happen in chat. A scoring system tracks what the user engages with.
 
 ## Context and memory
 
@@ -58,6 +77,7 @@ All configuration is via environment variables or a `.env` file. Key settings:
 | `LLM_API_KEY` | _(required)_ | OpenRouter API key |
 | `LLM_MODEL` | `deepseek/deepseek-chat` | Brain model |
 | `VISION_BASE_URL` | `http://localhost:8081/v1` | llama.cpp server URL |
+| `ENABLE_DISPLAY` | `1` | Disable the e-ink display + GPIO buttons with `0` (chat-only mode) |
 | `ENABLE_CAMERA` | `1` | Disable camera/vision with `0` |
 | `ENABLE_TTS` | `0` | Enable Piper TTS with `1` |
 | `CHAT_PASSWORD` | `admin` | Web chat login password |

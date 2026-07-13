@@ -33,6 +33,7 @@ from config import (
     estimate_tool_tokens,
     LLM_ESTIMATED_MAX_TOKENS,
     ENABLE_CAMERA,
+    ENABLE_DISPLAY,
     VISION_POLL_INTERVAL,
     MOTION_POLL_INTERVAL,
     CHILL_TIMEOUT,
@@ -51,11 +52,9 @@ from caffeine import DrinkStore
 from presence import ActiveTracker
 from status_publisher import StatusPublisher
 from context import Context
-from camera import Camera
 from ai_client import AIClient, LLMError, VisionClient
 from reolink import ReoLinkCamera
 from mcp_client import MCPClient
-from scene_change import SceneChangeDetector
 from sounds import play as play_sound
 from tts import speak as tts_speak, interrupt as tts_interrupt
 import logger
@@ -84,7 +83,13 @@ def http_post(path: str, data: dict, timeout: int = 5):
 class Orchestrator:
     def __init__(self):
         self.ctx = Context()
-        self.camera = Camera() if ENABLE_CAMERA else None
+        # Camera pulls in picamera2 (Pi-only) — import it lazily so the agent
+        # still runs on a plain laptop with ENABLE_CAMERA=0.
+        if ENABLE_CAMERA:
+            from camera import Camera
+            self.camera = Camera()
+        else:
+            self.camera = None
         self.ai = AIClient()
         self.vision = VisionClient() if ENABLE_CAMERA else None
         self.reolink = ReoLinkCamera(REOLINK_IP, REOLINK_USER, REOLINK_PASSWORD, REOLINK_TIMEOUT) if ENABLE_REOLINK else None
@@ -112,11 +117,15 @@ class Orchestrator:
         self.scene_lock = threading.Lock()
         self.motion_event = threading.Event()
         self.motion_description = ""
-        self.scene_detector = SceneChangeDetector(
-            rms_threshold=SCENE_RMS_THRESHOLD,
-            pct_threshold=SCENE_PCT_THRESHOLD,
-            max_stale_seconds=SCENE_MAX_STALE_SECONDS,
-        ) if ENABLE_CAMERA else None
+        if ENABLE_CAMERA:
+            from scene_change import SceneChangeDetector
+            self.scene_detector = SceneChangeDetector(
+                rms_threshold=SCENE_RMS_THRESHOLD,
+                pct_threshold=SCENE_PCT_THRESHOLD,
+                max_stale_seconds=SCENE_MAX_STALE_SECONDS,
+            )
+        else:
+            self.scene_detector = None
         self.vision_mode = "chill"  # "chill" when no motion, "active" when motion detected
         self.vision_requests_shown = False  # tracks if we've shown existing requests this turn
 
@@ -376,6 +385,8 @@ class Orchestrator:
         return min(30 * (2 ** n), 1800)
 
     def _display_error(self, msg: str):
+        if not ENABLE_DISPLAY:
+            return  # chat-only: no e-ink to show an error banner on
         try:
             requests.post(
                 f"{DISPLAY_SERVER_URL}/display",
@@ -732,6 +743,12 @@ class Orchestrator:
         if speak:
             tts_speak(text)
 
+        # Chat-only mode: there is no e-ink display. The message already
+        # surfaces in the web chat (the chat UI renders update_display tool
+        # calls), so just voice it and return — no display server round-trip.
+        if not ENABLE_DISPLAY:
+            return {"status": "ok", "message": "Message sent to chat."}
+
         timestamp = time.strftime("%-I:%M%p").lower().lstrip("0")
         text = f"{text}\n\n— {timestamp}"
 
@@ -753,6 +770,11 @@ class Orchestrator:
             return {"status": "error", "message": "No text provided"}
 
         tts_speak(text)
+
+        # Chat-only mode: the full message already renders in the chat UI, so
+        # there is no e-ink preview to show.
+        if not ENABLE_DISPLAY:
+            return {"status": "ok", "message": "Chat message sent."}
 
         # Show a preview on the e-ink display
         preview_max = 90
@@ -805,27 +827,28 @@ class Orchestrator:
                 info(f"[NOTIF] Due notification fired: {due['id']}")
                 return {"status": "interrupted", "reason": "notification_due", "waited": waited, "user_message": f'[Notification] id={due["id"]} — Time to show: "{due["message"]}"\nAfter showing it (or deferring), call schedule_notification with this ID to set when it fires next.'}
 
-            result = http_get("/buttons/state", timeout=2)
-            if result.get("button"):
-                http_post("/buttons/reset", {}, timeout=5)
-                self.presence.touch()
-                waited = int(time.monotonic() - start)
+            if ENABLE_DISPLAY:
+                result = http_get("/buttons/state", timeout=2)
+                if result.get("button"):
+                    http_post("/buttons/reset", {}, timeout=5)
+                    self.presence.touch()
+                    waited = int(time.monotonic() - start)
 
-                if self.notification_store.has_pending_proposal():
-                    approved = self.notification_store.approve_pending()
-                    info(f"[NOTIF] Proposal approved: {approved['id']}")
-                    user_msg = f'The user approved your notification: "{approved["message"]}"'
-                else:
-                    user_msg = "The user pressed a button — they want you to say something!"
+                    if self.notification_store.has_pending_proposal():
+                        approved = self.notification_store.approve_pending()
+                        info(f"[NOTIF] Proposal approved: {approved['id']}")
+                        user_msg = f'The user approved your notification: "{approved["message"]}"'
+                    else:
+                        user_msg = "The user pressed a button — they want you to say something!"
 
-                info(f"[WAIT] Interrupted by button press after {waited}s")
-                return {
-                    "status": "interrupted",
-                    "reason": f"Button {result['button']} pressed — injected nudge",
-                    "button": result["button"],
-                    "waited": waited,
-                    "user_message": user_msg,
-                }
+                    info(f"[WAIT] Interrupted by button press after {waited}s")
+                    return {
+                        "status": "interrupted",
+                        "reason": f"Button {result['button']} pressed — injected nudge",
+                        "button": result["button"],
+                        "waited": waited,
+                        "user_message": user_msg,
+                    }
             time.sleep(BUTTON_CHECK_INTERVAL)
 
         info(f"[WAIT] Completed {seconds}s.")
@@ -1003,24 +1026,25 @@ class Orchestrator:
                     self.ctx.add_user(f"Motion detected in the room! Here's what the camera sees: {desc}")
                 info("[IDLE] Interrupted by motion")
                 return
-            result = http_get("/buttons/state", timeout=2)
-            if result.get("button"):
-                http_post("/buttons/reset", {}, timeout=5)
-                self.presence.touch()
+            if ENABLE_DISPLAY:
+                result = http_get("/buttons/state", timeout=2)
+                if result.get("button"):
+                    http_post("/buttons/reset", {}, timeout=5)
+                    self.presence.touch()
 
-                if self.notification_store.has_pending_proposal():
-                    approved = self.notification_store.approve_pending()
-                    with self.ctx_lock:
-                        self.ctx.add_user(
-                            f'The user approved your notification: "{approved["message"]}"'
-                        )
-                    info(f"[NOTIF] Proposal approved in idle: {approved['id']}")
-                else:
-                    with self.ctx_lock:
-                        self.ctx.add_user("The user pressed a button — they want you to say something!")
+                    if self.notification_store.has_pending_proposal():
+                        approved = self.notification_store.approve_pending()
+                        with self.ctx_lock:
+                            self.ctx.add_user(
+                                f'The user approved your notification: "{approved["message"]}"'
+                            )
+                        info(f"[NOTIF] Proposal approved in idle: {approved['id']}")
+                    else:
+                        with self.ctx_lock:
+                            self.ctx.add_user("The user pressed a button — they want you to say something!")
 
-                info("[IDLE] Interrupted by button press")
-                return
+                    info("[IDLE] Interrupted by button press")
+                    return
             time.sleep(1)
         with self.ctx_lock:
             if ENABLE_CAMERA:
@@ -1372,15 +1396,25 @@ class ChatHandler(BaseHTTPRequestHandler):
         orch = ChatHandler.orchestrator
 
         REJECTION_KEYWORDS = ["no", "nah", "don't", "stop", "cancel", "never", "quit", "not that"]
+        AFFIRMATION_KEYWORDS = ["yes", "yeah", "yep", "yup", "sure", "ok", "okay", "sounds good", "go for it", "do it", "approve"]
 
+        approval_notice = None
         if orch.notification_store.has_pending_proposal():
             msg_lower = message.lower()
             if any(kw in msg_lower for kw in REJECTION_KEYWORDS):
                 rejected = orch.notification_store.reject_pending()
                 if rejected:
                     info(f"[NOTIF] Proposal rejected via chat: {rejected['id']}")
+            elif not ENABLE_DISPLAY and any(kw in msg_lower for kw in AFFIRMATION_KEYWORDS):
+                # No buttons in chat-only mode — an affirmative chat reply approves.
+                approved = orch.notification_store.approve_pending()
+                if approved:
+                    info(f"[NOTIF] Proposal approved via chat: {approved['id']}")
+                    approval_notice = f'The user approved your notification: "{approved["message"]}"'
 
         with orch.chat_queue_lock:
+            if approval_notice:
+                orch.chat_queue.append(approval_notice)
             orch.chat_queue.append(message)
         orch.chat_event.set()
         orch.presence.touch()

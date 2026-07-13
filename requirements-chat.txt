@@ -1,0 +1,9 @@
+# Chat-only mode (ENABLE_DISPLAY=0) — runs on a plain laptop/desktop.
+# No e-ink, no GPIO, no picamera2. Install with:  pip install -r requirements-chat.txt
+requests
+Pillow
+python-dotenv
+
+# Optional extras:
+#   boto3   — only if you enable the public caffeine feed (STATUS_S3_BUCKET set)
+#   numpy   — only if you run camera-on (ENABLE_CAMERA=1) with a webcam + vision server
