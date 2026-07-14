@@ -4,6 +4,7 @@ import io
 import base64
 import secrets
 import requests
+from urllib.parse import quote
 from PIL import Image
 
 
@@ -16,10 +17,14 @@ class ReoLinkCamera:
         self._base = f"http://{ip}"
 
     def _url(self, path: str, cmd: str, extra: str = "") -> str:
-        # Build URL manually — requests URL-encodes special chars like $ which Reolink rejects
+        # Percent-encode credentials but keep '$' literal: Reolink rejects an
+        # encoded '$' (%24), yet unencoded '#' in the password truncates the URL
+        # as a fragment. quote(safe="$") encodes '#', '&', etc. but not '$'.
         rs = secrets.token_hex(8)
+        user = quote(self.user, safe="$")
+        password = quote(self.password, safe="$")
         return (f"{self._base}{path}?cmd={cmd}&rs={rs}"
-                f"&user={self.user}&password={self.password}&channel=0{extra}")
+                f"&user={user}&password={password}&channel=0{extra}")
 
     def capture(self) -> tuple:
         """Capture a JPEG snapshot. Returns (jpeg_bytes, data_uri)."""
