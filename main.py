@@ -7,6 +7,8 @@ import signal
 import sys
 import json
 import secrets
+import socket
+import ssl
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
@@ -1060,14 +1062,42 @@ class Orchestrator:
         ChatHandler.orchestrator = self
         ChatHandler.session_token = self.session_token
         ChatHandler.use_https = CHAT_USE_HTTPS
+
+        ssl_ctx = None
+        if CHAT_USE_HTTPS:
+            ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ssl_ctx.load_cert_chain(SSL_CERT_FILE, SSL_KEY_FILE)
+
         class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
             daemon_threads = True
+
+            def get_request(self):
+                conn, addr = self.socket.accept()
+                if ssl_ctx is None:
+                    return conn, addr
+                # Don't blindly wrap in TLS: peek the first byte so a plaintext
+                # http:// request gets a helpful "use https://" reply instead of a
+                # bare connection reset. A TLS ClientHello always starts with the
+                # handshake record type 0x16; an HTTP request starts with an ASCII
+                # method (GET/POST/...). Leave non-TLS conns raw so ChatHandler can
+                # detect them and redirect.
+                try:
+                    conn.settimeout(5)
+                    first = conn.recv(1, socket.MSG_PEEK)
+                    conn.settimeout(None)
+                except OSError:
+                    conn.close()
+                    raise
+                if first[:1] == b"\x16":
+                    try:
+                        conn = ssl_ctx.wrap_socket(conn, server_side=True)
+                    except OSError:
+                        conn.close()
+                        raise
+                return conn, addr
+
         server = ThreadedHTTPServer(("0.0.0.0", CHAT_SERVER_PORT), ChatHandler)
         if CHAT_USE_HTTPS:
-            import ssl
-            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            ctx.load_cert_chain(SSL_CERT_FILE, SSL_KEY_FILE)
-            server.socket = ctx.wrap_socket(server.socket, server_side=True)
             info(f"[CHAT] HTTPS server listening on :{CHAT_SERVER_PORT}")
         else:
             info(f"[CHAT] Server listening on :{CHAT_SERVER_PORT}")
@@ -1275,7 +1305,28 @@ class ChatHandler(BaseHTTPRequestHandler):
         secure = "; Secure" if self.use_https else ""
         self.send_header("Set-Cookie", f"session={self.session_token}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax{secure}")
 
+    def _redirect_to_https(self):
+        """Client reached the TLS port over plaintext http://. Reply with a
+        readable message and a redirect so browsers auto-upgrade."""
+        host = self.headers.get("Host") or f"localhost:{CHAT_SERVER_PORT}"
+        location = f"https://{host}{self.path}"
+        body = (
+            f"This server requires HTTPS. Use {location}\n"
+        ).encode()
+        self.send_response(307)  # Temporary Redirect — preserves method, not cached
+        self.send_header("Location", location)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _plaintext_on_tls(self):
+        """True when the server expects TLS but this connection is plaintext."""
+        return self.use_https and not isinstance(self.connection, ssl.SSLSocket)
+
     def do_GET(self):
+        if self._plaintext_on_tls():
+            return self._redirect_to_https()
         if self.path.startswith("/login"):
             self._send_login()
         elif self.path == "/":
@@ -1290,6 +1341,8 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self):
+        if self._plaintext_on_tls():
+            return self._redirect_to_https()
         if self.path == "/login":
             self._handle_login()
         elif self.path == "/chat":
