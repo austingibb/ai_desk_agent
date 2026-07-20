@@ -34,6 +34,7 @@ from config import (
     POLICY_REMINDER,
     estimate_tool_tokens,
     LLM_ESTIMATED_MAX_TOKENS,
+    COMPACT_AFTER_N_MESSAGES,
     ENABLE_CAMERA,
     ENABLE_DISPLAY,
     VISION_POLL_INTERVAL,
@@ -368,7 +369,17 @@ class Orchestrator:
                         self.ctx.add_user(msg)
 
             try:
-                self.ctx.check_compact(self.ai, self.ctx_lock)
+                with self.ctx_lock:
+                    will_compact = len(self.ctx.messages) >= COMPACT_AFTER_N_MESSAGES
+                if will_compact:
+                    with self.status_lock:
+                        self.status_message = "Compacting memory..."
+                try:
+                    self.ctx.check_compact(self.ai, self.ctx_lock)
+                finally:
+                    if will_compact:
+                        with self.status_lock:
+                            self.status_message = ""
                 # Only merge summaries when user is away (chill mode) to avoid
                 # blocking the agent loop with back-to-back LLM calls
                 if self.vision_mode == "chill" or not ENABLE_CAMERA:
