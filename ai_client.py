@@ -217,7 +217,7 @@ _MERGE_PROMPT = (
     "You are reviewing a series of context summaries from an AI assistant's conversation history.\n"
     "Each summary was created at a different time and covers a different period.\n\n"
     "Your job is to REDUCE the number of summaries to at most {target} while preserving the most important information. You can:\n"
-    "- MERGE related or adjacent summaries into one\n"
+    "- MERGE summaries that are adjacent in time into one — only combine consecutive summary numbers (a gap is fine only if you are dropping the summaries in the gap). Never merge periods from far apart in time.\n"
     "- CONDENSE summaries that are too detailed (e.g., drop repetitive photo/wait cycles)\n"
     "- DROP summaries that contain only routine monitoring with no meaningful events\n"
     "- KEEP important summaries as-is\n\n"
@@ -232,7 +232,9 @@ _MERGE_PROMPT = (
     "- Repetitive photo descriptions of the same room\n"
     "- Routine wait/display/photo tool cycles\n"
     "- Redundant restatements of the same information across summaries\n\n"
+    "Each input summary below is numbered like [1], [2], etc.\n\n"
     "Return a JSON array of objects. Each object has:\n"
+    '- "sources": array of input summary numbers this entry covers, e.g. [3, 4, 5] (dropped summaries simply appear in no entry)\n'
     '- "time_range": the time period covered\n'
     '- "summary": the summary text\n\n'
     "TARGET: produce at most {target} summaries.\n"

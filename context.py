@@ -13,6 +13,10 @@ def _ts_fmt(ts: float) -> str:
     return _time.strftime("[%a %H:%M:%S]", _time.localtime(ts))
 
 
+def _date_fmt(ts: float) -> str:
+    return _time.strftime("%a %Y-%m-%d %H:%M", _time.localtime(ts))
+
+
 class Context:
     def __init__(self):
         self.messages = []
@@ -171,8 +175,8 @@ class Context:
     def get_messages(self) -> list:
         result = []
         for m in self.messages:
-            msg = dict(m)
-            ts = msg.pop("_ts", None)
+            msg = {k: v for k, v in m.items() if not k.startswith("_")}
+            ts = m.get("_ts")
             if ts and msg.get("role") != "system":
                 ts_str = _ts_fmt(ts)
                 content = msg.get("content", "")
@@ -388,7 +392,7 @@ class Context:
 
         ts_min = min(m.get("_ts", self._now()) for m in to_compact)
         ts_max = max(m.get("_ts", self._now()) for m in to_compact)
-        date_label = f"{_ts_fmt(ts_min)} \u2013 {_ts_fmt(ts_max)}"
+        date_label = f"{_date_fmt(ts_min)} \u2013 {_date_fmt(ts_max)}"
 
         text_parts = []
         for m in to_compact:
@@ -430,9 +434,9 @@ class Context:
         else:
             fallback_summary = "Compaction failed for this period — no recoverable content."
 
-        return (combined, fallback_summary, system_msg, existing_summaries, end, keep_count, len(to_compact), date_label)
+        return (combined, fallback_summary, system_msg, existing_summaries, end, keep_count, len(to_compact), date_label, ts_min, ts_max)
 
-    def _apply_compact(self, system_msg, existing_summaries, end, keep_count, to_compact_len, date_label, summary):
+    def _apply_compact(self, system_msg, existing_summaries, end, keep_count, to_compact_len, date_label, summary, ts_min, ts_max):
         """Apply compaction result. Must be called with lock held."""
         new_messages = []
         if system_msg:
@@ -442,6 +446,8 @@ class Context:
             "role": "user",
             "content": f"[Previous context summary: {date_label}] {summary}",
             "_ts": self._now(),
+            "_ts_min": ts_min,
+            "_ts_max": ts_max,
         })
         new_messages.extend(self.messages[end:])
         self.messages = new_messages
@@ -459,7 +465,7 @@ class Context:
         if prep is None:
             return
 
-        combined, fallback_summary, system_msg, existing_summaries, end, keep_count, to_compact_len, date_label = prep
+        combined, fallback_summary, system_msg, existing_summaries, end, keep_count, to_compact_len, date_label, ts_min, ts_max = prep
 
         try:
             summary = ai_client.compact(combined)
@@ -469,20 +475,47 @@ class Context:
 
         if ctx_lock:
             with ctx_lock:
-                self._apply_compact(system_msg, existing_summaries, end, keep_count, to_compact_len, date_label, summary)
+                self._apply_compact(system_msg, existing_summaries, end, keep_count, to_compact_len, date_label, summary, ts_min, ts_max)
         else:
-            self._apply_compact(system_msg, existing_summaries, end, keep_count, to_compact_len, date_label, summary)
+            self._apply_compact(system_msg, existing_summaries, end, keep_count, to_compact_len, date_label, summary, ts_min, ts_max)
 
     def _prepare_merge_summaries(self):
-        """Gather data for merge. Must be called with lock held. Returns summaries_text or None."""
+        """Gather data for merge. Must be called with lock held. Returns (summaries_text, ranges) or None.
+
+        Summaries are numbered [1]..[N] so the LLM can report which inputs each
+        merged entry covers; ranges[i] holds the i-th summary's (_ts_min, _ts_max)
+        so merged date labels can be computed in code instead of trusted to the LLM.
+        """
         summary_items = [(i, m) for i, m in enumerate(self.messages) if self._is_summary(m)]
         if len(summary_items) <= MERGE_SUMMARIES_AFTER:
             return None
-        summaries_text = "\n\n---\n\n".join(m["content"] for _, m in summary_items)
+        ranges = [(m.get("_ts_min"), m.get("_ts_max")) for _, m in summary_items]
+        summaries_text = "\n\n---\n\n".join(f"[{n}] {m['content']}" for n, (_, m) in enumerate(summary_items, 1))
         info(f"[CONTEXT] Merging {len(summary_items)} summaries ({len(summaries_text)} total chars)...")
-        return summaries_text
+        return summaries_text, ranges
 
-    def _apply_merge_summaries(self, summaries_text, merged):
+    def _merged_range(self, item, ranges, kept_idxs):
+        """Compute (ts_min, ts_max) for a merged entry from its source summaries' stored ranges. Returns None if unavailable (bad/missing sources, legacy summaries without _ts_min/_ts_max, or a kept summary falling inside the span — a min/max label would falsely claim coverage of that period)."""
+        sources = item.get("sources")
+        if not isinstance(sources, list) or not sources:
+            return None
+        idxs = []
+        for s in sources:
+            try:
+                idxs.append(int(s))
+            except (TypeError, ValueError):
+                return None
+        if any(i < 1 or i > len(ranges) for i in idxs):
+            return None
+        if any(i in kept_idxs and i not in idxs for i in range(min(idxs) + 1, max(idxs))):
+            return None
+        mins = [ranges[i - 1][0] for i in idxs]
+        maxs = [ranges[i - 1][1] for i in idxs]
+        if any(v is None for v in mins) or any(v is None for v in maxs):
+            return None
+        return min(mins), max(maxs)
+
+    def _apply_merge_summaries(self, summaries_text, ranges, merged):
         """Apply merge result. Must be called with lock held."""
         if not merged:
             info(f"[CONTEXT] Summary merge produced no summaries, skipping. Input was {len(summaries_text)} chars")
@@ -493,15 +526,35 @@ class Context:
             info(f"[CONTEXT] Summary merge produced {len(merged)} summaries (was {len(summary_items)}), skipping — not an improvement")
             return
 
+        kept_idxs = set()
+        for item in merged:
+            if isinstance(item, dict):
+                for s in item.get("sources") or []:
+                    try:
+                        kept_idxs.add(int(s))
+                    except (TypeError, ValueError):
+                        pass
+
         new_summaries = []
         for item in merged:
-            if not isinstance(item, dict) or "time_range" not in item or "summary" not in item:
+            if not isinstance(item, dict) or "summary" not in item:
                 continue
-            new_summaries.append({
+            span = self._merged_range(item, ranges, kept_idxs)
+            if span:
+                ts_min, ts_max = span
+                label = f"{_date_fmt(ts_min)} – {_date_fmt(ts_max)}"
+            elif item.get("time_range"):
+                label = str(item["time_range"])
+            else:
+                continue
+            msg = {
                 "role": "user",
-                "content": f"[Previous context summary: {item['time_range']}] {item['summary']}",
+                "content": f"[Previous context summary: {label}] {item['summary']}",
                 "_ts": self._now(),
-            })
+            }
+            if span:
+                msg["_ts_min"], msg["_ts_max"] = span
+            new_summaries.append(msg)
 
         if not new_summaries or len(new_summaries) >= len(summary_items):
             info(f"[CONTEXT] Summary merge result invalid ({len(new_summaries)} valid summaries), skipping")
@@ -518,12 +571,13 @@ class Context:
         """Merge, condense, or drop old compaction summaries. Only touches summary messages. Does not hold lock during LLM call."""
         if ctx_lock:
             with ctx_lock:
-                summaries_text = self._prepare_merge_summaries()
+                prep = self._prepare_merge_summaries()
         else:
-            summaries_text = self._prepare_merge_summaries()
+            prep = self._prepare_merge_summaries()
 
-        if summaries_text is None:
+        if prep is None:
             return
+        summaries_text, ranges = prep
 
         try:
             merged = ai_client.merge_summaries(summaries_text)
@@ -533,9 +587,9 @@ class Context:
 
         if ctx_lock:
             with ctx_lock:
-                self._apply_merge_summaries(summaries_text, merged)
+                self._apply_merge_summaries(summaries_text, ranges, merged)
         else:
-            self._apply_merge_summaries(summaries_text, merged)
+            self._apply_merge_summaries(summaries_text, ranges, merged)
 
     def _is_image_message(self, msg: dict) -> bool:
         content = msg.get("content", "")
