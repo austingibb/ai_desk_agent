@@ -86,9 +86,17 @@ class DrinkStore:
             ]
 
     def total_recent_mg(self) -> int:
+        """Sum of all drinks within the retention window (up to 30 days), not just 24h."""
         with self._lock:
             self._prune()
             return sum(d["mg"] for d in self.drinks)
+
+    def total_last_24h_mg(self) -> int:
+        """Sum of drinks in the last 24 actual hours."""
+        cutoff_ms = int((_time.time() - 86400) * 1000)
+        with self._lock:
+            self._prune()
+            return sum(d["mg"] for d in self.drinks if d.get("t", 0) >= cutoff_ms)
 
     def list_recent(self, n: int = 20) -> list:
         with self._lock:

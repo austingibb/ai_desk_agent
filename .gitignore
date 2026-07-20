@@ -8,3 +8,5 @@ context.json
 notifications.json
 user_data/
 drinks.json
+*.md
+!README.md

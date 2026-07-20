@@ -887,12 +887,12 @@ class Orchestrator:
         entry = self.drink_store.add(mg, label, minutes_ago)
         self.status_publisher.trigger()
         at_str = time.strftime("%-I:%M%p", time.localtime(entry["t"] / 1000)).lower().lstrip("0")
-        total = self.drink_store.total_recent_mg()
-        info(f"[CAFFEINE] Logged {mg}mg ({label}) at {at_str} — 24h total {total}mg")
+        total_24h = self.drink_store.total_last_24h_mg()
+        info(f"[CAFFEINE] Logged {mg}mg ({label}) at {at_str} — 24h total {total_24h}mg")
         published = "Feed updates within a minute." if self.status_publisher.enabled else "Note: AWS publishing is not configured, logged locally only."
         return {
             "status": "ok",
-            "message": f"Logged {mg}mg ({label}) at {at_str}. Last 24h total: {total}mg. {published}",
+            "message": f"Logged {mg}mg ({label}) at {at_str}. Last 24h total: {total_24h}mg. {published}",
         }
 
     def _tool_list_drinks(self, args: dict) -> dict:
