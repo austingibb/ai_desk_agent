@@ -219,7 +219,6 @@ class Orchestrator:
     def _turn(self):
         tool_call_count = 0
         last_tool_name = None
-        nudged = False
 
         while self.running:
             tools = list(get_tool_definitions())
@@ -329,12 +328,6 @@ class Orchestrator:
                         result = self._tool_update_display({"text": content})
                     if result.get("status") == "ok":
                         self._tool_wait({})
-                    continue
-                if tool_call_count > 0 and not nudged:
-                    info("[PROMPT] No tool call after tool execution, nudging LLM to continue rhythm...")
-                    with self.ctx_lock:
-                        self.ctx.add_user("Continue the rhythm — what's your next action?")
-                    nudged = True
                     continue
                 info("[IDLE] AI produced no tool calls. Waiting...")
                 self._idle_wait()
