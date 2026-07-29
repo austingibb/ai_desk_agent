@@ -1470,7 +1470,7 @@ function msgKey(m){
 }
 
 function msgHTML(m){
-  const text=escapeHTML(m.content||'').replace(/\n/g,'<br>');
+  const text=escapeHTML(m.content||'').replace(/\\n/g,'<br>');
   const images=(m.images||[]).map(i=>
     `<a href="${escapeHTML(i.url)}" target="_blank" rel="noopener"><img class="chat-media" src="${escapeHTML(i.url)}" alt="${escapeHTML(i.name||'Uploaded image')}" loading="lazy"></a>`
   ).join('');
@@ -1753,17 +1753,18 @@ class ChatHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self._plaintext_on_tls():
             return self._redirect_to_https()
-        if self.path.startswith("/login"):
+        path = self.path.split("?", 1)[0]
+        if path == "/login":
             self._send_login()
-        elif self.path == "/":
+        elif path == "/":
             if not self._require_auth():
                 return
             self._serve_html()
-        elif self.path == "/chat":
+        elif path == "/chat":
             if not self._require_auth():
                 return
             self._get_messages()
-        elif self.path.startswith("/chat/media/"):
+        elif path.startswith("/chat/media/"):
             if not self._require_auth():
                 return
             self._get_media()
@@ -1773,9 +1774,10 @@ class ChatHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self._plaintext_on_tls():
             return self._redirect_to_https()
-        if self.path == "/login":
+        path = self.path.split("?", 1)[0]
+        if path == "/login":
             self._handle_login()
-        elif self.path == "/chat":
+        elif path == "/chat":
             if not self._require_auth():
                 return
             self._post_message()

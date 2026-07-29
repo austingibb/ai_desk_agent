@@ -120,6 +120,13 @@ class ChatHTTPTests(unittest.TestCase):
         self.assertEqual(response.getheader("Content-Type"), "image/gif")
         self.assertEqual(response.read(), raw)
 
+    def test_homepage_query_and_rendered_javascript(self):
+        response = self._request("GET", "/?")
+        self.assertEqual(response.status, 200)
+        html = response.read().decode()
+        self.assertIn("replace(/\\n/g,'<br>')", html)
+        self.assertNotIn("replace(/\n/g,'<br>')", html)
+
 
 if __name__ == "__main__":
     unittest.main()
