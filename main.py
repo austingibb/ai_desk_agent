@@ -30,8 +30,11 @@ from config import (
     CHAT_USE_HTTPS,
     SSL_CERT_FILE,
     SSL_KEY_FILE,
+    CHAT_MAX_IMAGES_PER_MESSAGE,
+    CHAT_MAX_MEDIA_BYTES,
+    CHAT_MAX_REQUEST_BYTES,
     REVIEW_INTERVAL,
-    POLICY_REMINDER,
+    build_policy_reminder,
     estimate_tool_tokens,
     LLM_ESTIMATED_MAX_TOKENS,
     COMPACT_AFTER_N_MESSAGES,
@@ -49,13 +52,17 @@ from config import (
     REOLINK_USER,
     REOLINK_PASSWORD,
     REOLINK_TIMEOUT,
+    POMODORO_WORK_MINUTES,
+    POMODORO_IDLE_EXIT_SECONDS,
 )
 from notifications import NotificationStore
 from caffeine import DrinkStore
+from pomodoro import PomodoroStore
 from presence import ActiveTracker
 from status_publisher import StatusPublisher
 from context import Context
 from ai_client import AIClient, LLMError, VisionClient
+from chat_media import ChatMediaError, build_chat_message, media_data_from_message
 from reolink import ReoLinkCamera
 from mcp_client import MCPClient
 from sounds import play as play_sound
@@ -83,6 +90,22 @@ def http_post(path: str, data: dict, timeout: int = 5):
     return False
 
 
+def _visible_response_text(response: dict) -> str:
+    """Text the user will see from a model response, for media demotion context."""
+    parts = []
+    content = (response.get("content") or "").strip()
+    if content:
+        parts.append(content)
+    for tool_call in response.get("tool_calls", []):
+        if tool_call.get("name") not in ("update_display", "send_chat_message"):
+            continue
+        args = tool_call.get("arguments", {})
+        text = args.get("text", "") if isinstance(args, dict) else ""
+        if isinstance(text, str) and text.strip():
+            parts.append(text.strip())
+    return "\n".join(dict.fromkeys(parts))
+
+
 class Orchestrator:
     def __init__(self):
         self.ctx = Context()
@@ -99,13 +122,23 @@ class Orchestrator:
         self.running = True
         self.last_display_time = 0
         self.chat_event = threading.Event()
-        self.chat_queue = []       # queued chat messages (added by handler, drained by main loop)
+        # Entries are either legacy text strings or {"content": multipart,
+        # "chat_images": UI metadata} for user-uploaded images/GIFs.
+        self.chat_queue = []
         self.chat_queue_lock = threading.Lock()
         self.ctx_lock = threading.Lock()
         self.mcp_tools = []
         self.mcp = None
         self.notification_store = NotificationStore()
         self.drink_store = DrinkStore()
+        self.pomodoro_store = PomodoroStore()
+        # Pomodoro mode: e-ink shows a focus screen (count + block end) and a
+        # button press logs +1 cycle. See _render_pomodoro_screen / _tool_wait.
+        self.pomodoro_mode = False
+        self.pomodoro_work_minutes = POMODORO_WORK_MINUTES
+        self.pomodoro_block_end = 0.0      # epoch seconds the current work block ends
+        self.pomodoro_last_activity = 0.0  # last button/chat/motion while focusing
+        self.pomodoro_idle_notified = False
         self.presence = ActiveTracker()
         self.status_publisher = StatusPublisher(self.drink_store, self.presence)
         self.last_review_time = time.time()
@@ -172,7 +205,7 @@ class Orchestrator:
 
     def run(self):
         info("Init camera...")
-        info("Init AI client (DeepSeek on OpenRouter)...")
+        info(f"Init AI client ({self.ai.model} on OpenRouter)...")
         info("Init vision client (local Gemma)...")
         self._start_chat_server()
         self.status_publisher.start()
@@ -232,14 +265,22 @@ class Orchestrator:
             if queued:
                 with self.ctx_lock:
                     for msg in queued:
-                        self.ctx.add_user(msg)
+                        if isinstance(msg, dict):
+                            self.ctx.add_user(
+                                msg.get("content", ""),
+                                chat_images=msg.get("chat_images"),
+                            )
+                        else:
+                            self.ctx.add_user(msg)
 
             with self.ctx_lock:
+                self.ctx.demote_old_images()
                 self.ctx._repair_pairing()
                 messages = self.ctx.get_messages()
                 msg_tokens = self.ctx.total_tokens()
-            messages.append({"role": "user", "content": POLICY_REMINDER})
-            estimated = msg_tokens + estimate_tool_tokens(tools) + len(POLICY_REMINDER) // 4
+            reminder = build_policy_reminder()
+            messages.append({"role": "user", "content": reminder})
+            estimated = msg_tokens + estimate_tool_tokens(tools) + len(reminder) // 4
             if estimated > LLM_ESTIMATED_MAX_TOKENS:
                 info(f"[LLM] Token estimate {estimated} exceeds limit {LLM_ESTIMATED_MAX_TOKENS}, compacting...")
                 with self.status_lock:
@@ -254,8 +295,9 @@ class Orchestrator:
                 with self.ctx_lock:
                     messages = self.ctx.get_messages()
                     msg_tokens = self.ctx.total_tokens()
-                messages.append({"role": "user", "content": POLICY_REMINDER})
-                estimated = msg_tokens + estimate_tool_tokens(tools) + len(POLICY_REMINDER) // 4
+                reminder = build_policy_reminder()
+                messages.append({"role": "user", "content": reminder})
+                estimated = msg_tokens + estimate_tool_tokens(tools) + len(reminder) // 4
                 info(f"[LLM] After compaction: ~{msg_tokens} msg tokens + {estimate_tool_tokens(tools)} tool tokens = ~{estimated} total")
             info(f"[LLM] Sending {len(messages)} messages (~{msg_tokens} msg tokens, ~{estimate_tool_tokens(tools)} tool tokens, ~{estimated} total)...")
             play_sound("thinking")
@@ -308,6 +350,9 @@ class Orchestrator:
 
             with self.ctx_lock:
                 self.ctx.add_assistant(response)
+                self.ctx.note_latest_image_response(
+                    _visible_response_text(response)
+                )
 
             if response["reasoning"]:
                 info(f"[REASONING] {response['reasoning'][:200]}...")
@@ -317,7 +362,7 @@ class Orchestrator:
                 info(f"[AI] {response['content']}")
 
             if not response["tool_calls"]:
-                # If DeepSeek returned text but no tool call, display it automatically
+                # If the brain model returned text but no tool call, display it automatically
                 if response["content"]:
                     content = response["content"]
                     if len(content) > 140:
@@ -363,6 +408,7 @@ class Orchestrator:
 
             try:
                 with self.ctx_lock:
+                    self.ctx.demote_old_images()
                     will_compact = len(self.ctx.messages) >= COMPACT_AFTER_N_MESSAGES
                 if will_compact:
                     with self.status_lock:
@@ -443,6 +489,18 @@ class Orchestrator:
             return self._tool_list_drinks(args)
         elif name == "edit_drink":
             return self._tool_edit_drink(args)
+        elif name == "log_pomodoro":
+            return self._tool_log_pomodoro(args)
+        elif name == "list_pomodoros":
+            return self._tool_list_pomodoros(args)
+        elif name == "edit_pomodoro":
+            return self._tool_edit_pomodoro(args)
+        elif name == "pomodoro_stats":
+            return self._tool_pomodoro_stats(args)
+        elif name == "enter_pomodoro_mode":
+            return self._tool_enter_pomodoro_mode(args)
+        elif name == "exit_pomodoro_mode":
+            return self._tool_exit_pomodoro_mode(args)
         elif name == "propose_notification":
             play_sound("update_display")
             return self._tool_propose_notification(args)
@@ -755,6 +813,11 @@ class Orchestrator:
         if not ENABLE_DISPLAY:
             return {"status": "ok", "message": "Message sent to chat."}
 
+        # Pomodoro mode owns the e-ink (the focus screen). Don't overwrite it —
+        # the text still reaches the user via voice and the web chat log.
+        if self.pomodoro_mode:
+            return {"status": "ok", "message": "Sent to chat/voice. The e-ink keeps showing the pomodoro focus screen."}
+
         timestamp = time.strftime("%-I:%M%p").lower().lstrip("0")
         text = f"{text}\n\n— {timestamp}"
 
@@ -782,6 +845,10 @@ class Orchestrator:
         if not ENABLE_DISPLAY:
             return {"status": "ok", "message": "Chat message sent."}
 
+        # Pomodoro mode owns the e-ink (the focus screen) — skip the preview.
+        if self.pomodoro_mode:
+            return {"status": "ok", "message": "Chat message sent. The e-ink keeps showing the pomodoro focus screen."}
+
         # Show a preview on the e-ink display
         preview_max = 90
         if len(text) <= preview_max:
@@ -801,17 +868,38 @@ class Orchestrator:
         while time.monotonic() - start < seconds:
             if self.chat_event.is_set():
                 self.chat_event.clear()
+                self._note_pomodoro_activity()
                 waited = int(time.monotonic() - start)
                 info(f"[WAIT] Interrupted by chat message after {waited}s")
                 return {"status": "interrupted", "reason": "chat_message", "waited": waited}
 
             if self.motion_event.is_set():
                 self.motion_event.clear()
+                self._note_pomodoro_activity()
                 waited = int(time.monotonic() - start)
                 desc = self.motion_description or "Something moved"
                 info(f"[WAIT] Interrupted by motion after {waited}s")
                 return {"status": "interrupted", "reason": "motion_detected", "waited": waited,
                         "user_message": f"Motion detected in the room! Here's what the camera sees: {desc}"}
+
+            # In pomodoro mode, if he's gone quiet with no button/chat/motion for
+            # the idle window, nudge the agent once to decide (from context) whether
+            # to exit. The agent, not the loop, makes the call.
+            if (self.pomodoro_mode and not self.pomodoro_idle_notified
+                    and time.time() - self.pomodoro_last_activity > POMODORO_IDLE_EXIT_SECONDS
+                    and not self.presence.is_active()):
+                self.pomodoro_idle_notified = True
+                waited = int(time.monotonic() - start)
+                mins = POMODORO_IDLE_EXIT_SECONDS // 60
+                info(f"[POMODORO] Idle {mins}min in pomodoro mode — nudging agent to decide")
+                return {
+                    "status": "interrupted", "reason": "pomodoro_idle", "waited": waited,
+                    "user_message": (
+                        f"You've been in pomodoro mode for {mins} min with no button press, "
+                        "chat, or motion. If Austin seems to have left or is done, call "
+                        "exit_pomodoro_mode. If he might just be heads-down working, leave it on."
+                    ),
+                }
 
             if not self.running:
                 return {"status": "interrupted", "reason": "shutdown", "waited": int(time.monotonic() - start)}
@@ -839,6 +927,21 @@ class Orchestrator:
                     http_post("/buttons/reset", {}, timeout=5)
                     self.presence.touch()
                     waited = int(time.monotonic() - start)
+
+                    # In pomodoro mode a press means "I finished a cycle" — log it.
+                    if self.pomodoro_mode:
+                        self._log_pomodoro_cycle()
+                        stats = self.pomodoro_store.stats()
+                        info(f"[POMODORO] Button logged a cycle — today {stats['today']}")
+                        return {
+                            "status": "interrupted", "reason": "pomodoro_button", "waited": waited,
+                            "button": result["button"],
+                            "user_message": (
+                                f"Austin pressed the button — logged a completed pomodoro. "
+                                f"Today: {stats['today']}, current streak: {stats['current_streak']} days. "
+                                "Give him a quick bit of encouragement."
+                            ),
+                        }
 
                     if self.notification_store.has_pending_proposal():
                         approved = self.notification_store.approve_pending()
@@ -928,6 +1031,152 @@ class Orchestrator:
             "status": "ok",
             "message": f"Updated drink: {updated['mg']}mg {updated['label']}",
             "drink": updated,
+        }
+
+    # --- Pomodoro ---------------------------------------------------------
+
+    def _publish_pomodoro_stats(self):
+        """MOCK feed publish. The real dev-site feed (public S3, like caffeine)
+        is deferred — for now write the payload to a local pomodoro.json so it's
+        inspectable and the wiring is ready. Swap this for an S3 put later."""
+        try:
+            stats = self.pomodoro_store.stats()
+            path = os.path.join(PROJECT_DIR, "pomodoro.json")
+            with open(path, "w") as f:
+                json.dump(stats, f)
+            info(f"[POMODORO] (mock feed) wrote stats: {stats}")
+        except Exception as e:
+            info(f"[POMODORO] Mock feed write failed: {e}")
+
+    def _log_pomodoro_cycle(self, label: str = "pomodoro", minutes_ago: int = 0) -> dict:
+        """Append a cycle and refresh mock feed + focus screen. Shared by the
+        log_pomodoro tool and the in-mode button press."""
+        entry = self.pomodoro_store.add(label, minutes_ago)
+        self._publish_pomodoro_stats()
+        if self.pomodoro_mode:
+            # A finished cycle starts a fresh work block; bump the shown end time.
+            self.pomodoro_block_end = time.time() + self.pomodoro_work_minutes * 60
+            self.pomodoro_last_activity = time.time()
+            self.pomodoro_idle_notified = False
+            self._render_pomodoro_screen()
+        return entry
+
+    def _note_pomodoro_activity(self):
+        """Mark recent user activity so the idle-exit nudge doesn't fire on someone
+        who's actively working (chat/motion during a focus session)."""
+        if self.pomodoro_mode:
+            self.pomodoro_last_activity = time.time()
+            self.pomodoro_idle_notified = False
+
+    def _render_pomodoro_screen(self):
+        """Draw the focus screen on the e-ink (count + estimated block end)."""
+        if not ENABLE_DISPLAY:
+            return
+        count = self.pomodoro_store.count_today()
+        ends = time.strftime("%-I:%M%p", time.localtime(self.pomodoro_block_end)).lower().lstrip("0")
+        elapsed = time.monotonic() - self.last_display_time
+        if elapsed < MIN_DISPLAY_INTERVAL:
+            time.sleep(MIN_DISPLAY_INTERVAL - elapsed)
+        # Prefer the dedicated big-number screen; fall back to plain text if the
+        # display server predates the /display/pomodoro endpoint.
+        ok = http_post("/display/pomodoro", {"count": count, "ends": ends}, timeout=15)
+        if not ok:
+            http_post("/display", {"text": f"POMODORO MODE\nDone today: {count}\nBlock ends {ends}"}, timeout=15)
+        self.last_display_time = time.monotonic()
+
+    def _tool_log_pomodoro(self, args: dict) -> dict:
+        label = str(args.get("label") or "pomodoro").strip() or "pomodoro"
+        try:
+            minutes_ago = max(0, int(args.get("minutes_ago") or 0))
+        except (TypeError, ValueError):
+            minutes_ago = 0
+        entry = self._log_pomodoro_cycle(label, minutes_ago)
+        at_str = time.strftime("%-I:%M%p", time.localtime(entry["t"] / 1000)).lower().lstrip("0")
+        stats = self.pomodoro_store.stats()
+        info(f"[POMODORO] Logged cycle ({label}) at {at_str} — today {stats['today']}, streak {stats['current_streak']}")
+        return {
+            "status": "ok",
+            "message": f"Logged a pomodoro ({label}) at {at_str}. Today: {stats['today']}, current streak: {stats['current_streak']} days.",
+            "stats": stats,
+        }
+
+    def _tool_list_pomodoros(self, args: dict) -> dict:
+        cycles = self.pomodoro_store.list_recent()
+        if not cycles:
+            return {"status": "ok", "message": "No pomodoros logged yet.", "cycles": []}
+        formatted = []
+        for c in cycles:
+            t = c.get("t", 0)
+            ts_str = time.strftime("%-I:%M%p %a %b %d", time.localtime(t / 1000)).lower().lstrip("0")
+            formatted.append({"timestamp_ms": t, "time": ts_str, "label": c.get("label", "")})
+        return {"status": "ok", "cycles": formatted}
+
+    def _tool_edit_pomodoro(self, args: dict) -> dict:
+        timestamp_ms = int(args.get("timestamp_ms", 0))
+        if not timestamp_ms:
+            return {"status": "error", "message": "timestamp_ms is required"}
+        if args.get("delete"):
+            if self.pomodoro_store.delete(timestamp_ms):
+                self._publish_pomodoro_stats()
+                if self.pomodoro_mode:
+                    self._render_pomodoro_screen()
+                return {"status": "ok", "message": "Deleted that pomodoro cycle."}
+            return {"status": "error", "message": f"No cycle found with timestamp_ms={timestamp_ms}. Try list_pomodoros."}
+        label = args.get("label")
+        if label is not None:
+            label = str(label).strip()
+        if label is None:
+            return {"status": "error", "message": "Provide a label to update, or delete=true to remove."}
+        updated = self.pomodoro_store.edit(timestamp_ms, label=label)
+        if not updated:
+            return {"status": "error", "message": f"No cycle found with timestamp_ms={timestamp_ms}. Try list_pomodoros."}
+        self._publish_pomodoro_stats()
+        return {"status": "ok", "message": f"Updated cycle label to '{updated['label']}'.", "cycle": updated}
+
+    def _tool_pomodoro_stats(self, args: dict) -> dict:
+        stats = self.pomodoro_store.stats()
+        return {"status": "ok", "stats": stats}
+
+    def _tool_enter_pomodoro_mode(self, args: dict) -> dict:
+        try:
+            wm = int(args.get("work_minutes") or POMODORO_WORK_MINUTES)
+        except (TypeError, ValueError):
+            wm = POMODORO_WORK_MINUTES
+        self.pomodoro_work_minutes = max(1, wm)
+        self.pomodoro_mode = True
+        self.pomodoro_block_end = time.time() + self.pomodoro_work_minutes * 60
+        self.pomodoro_last_activity = time.time()
+        self.pomodoro_idle_notified = False
+        self.presence.touch()
+        count = self.pomodoro_store.count_today()
+        ends = time.strftime("%-I:%M%p", time.localtime(self.pomodoro_block_end)).lower().lstrip("0")
+        self._render_pomodoro_screen()
+        info(f"[POMODORO] Entered pomodoro mode ({self.pomodoro_work_minutes}min blocks), {count} done today")
+        if ENABLE_DISPLAY:
+            btn = "Press the button when you finish a cycle and I'll log it."
+        else:
+            btn = "Tell me when you finish a cycle and I'll log it."
+        return {
+            "status": "ok",
+            "message": f"Pomodoro mode on. {count} done today, this block ends {ends}. {btn}",
+        }
+
+    def _tool_exit_pomodoro_mode(self, args: dict) -> dict:
+        was_on = self.pomodoro_mode
+        self.pomodoro_mode = False
+        self.pomodoro_idle_notified = False
+        stats = self.pomodoro_store.stats()
+        if ENABLE_DISPLAY and was_on:
+            # Return the e-ink to a normal message.
+            self._tool_update_display(
+                {"text": f"Focus session done. {stats['today']} cycles today. Nice work."},
+                speak=False,
+            )
+        info(f"[POMODORO] Exited pomodoro mode — {stats['today']} today")
+        return {
+            "status": "ok",
+            "message": f"Left pomodoro mode. {stats['today']} cycles today, streak {stats['current_streak']} days.",
+            "stats": stats,
         }
 
     def _tool_propose_notification(self, args: dict) -> dict:
@@ -1024,9 +1273,11 @@ class Orchestrator:
                 return
             if self.chat_event.is_set():
                 self.chat_event.clear()
+                self._note_pomodoro_activity()
                 return
             if self.motion_event.is_set():
                 self.motion_event.clear()
+                self._note_pomodoro_activity()
                 desc = self.motion_description or "Something moved"
                 with self.ctx_lock:
                     self.ctx.add_user(f"Motion detected in the room! Here's what the camera sees: {desc}")
@@ -1037,6 +1288,19 @@ class Orchestrator:
                 if result.get("button"):
                     http_post("/buttons/reset", {}, timeout=5)
                     self.presence.touch()
+
+                    # Pomodoro mode: a press logs a completed cycle.
+                    if self.pomodoro_mode:
+                        self._log_pomodoro_cycle()
+                        stats = self.pomodoro_store.stats()
+                        with self.ctx_lock:
+                            self.ctx.add_user(
+                                f"Austin pressed the button — logged a completed pomodoro. "
+                                f"Today: {stats['today']}, current streak: {stats['current_streak']} days. "
+                                "Give him a quick bit of encouragement."
+                            )
+                        info(f"[POMODORO] Button logged a cycle (idle) — today {stats['today']}")
+                        return
 
                     if self.notification_store.has_pending_proposal():
                         approved = self.notification_store.approve_pending()
@@ -1143,6 +1407,17 @@ body{font-family:system-ui,sans-serif;background:#1a1a2e;color:#e0e0e0;height:10
 .msg{padding:10px 14px;border-radius:12px;word-wrap:break-word;line-height:1.4}
 .msg-wrap.user .msg{background:#0f3460;color:#e0e0e0}
 .msg-wrap.assistant .msg{background:#16213e;color:#e0e0e0}
+.media-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:8px}
+.media-grid:empty{display:none}
+.chat-media{display:block;max-width:100%;max-height:360px;border-radius:8px;object-fit:contain;background:#0b1224}
+#composer{background:#16213e;border-top:1px solid #0f3460}
+#attachments{display:none;gap:8px;padding:10px 12px 0;overflow-x:auto}
+#attachments.show{display:flex}
+.attachment{position:relative;flex:0 0 80px;height:64px}
+.attachment img{width:80px;height:64px;object-fit:cover;border-radius:8px;border:1px solid #0f3460}
+.attachment button{position:absolute;right:-5px;top:-7px;width:22px;height:22px;padding:0;border-radius:50%;font-size:14px;line-height:22px}
+#upload-error{display:none;color:#ff8ca0;font-size:12px;padding:7px 14px 0}
+#upload-error.show{display:block}
 #form{display:flex;gap:8px;padding:12px;background:#16213e;border-top:1px solid #0f3460}
 #input{flex:1;padding:10px 14px;border:1px solid #0f3460;border-radius:20px;background:#1a1a2e;color:#e0e0e0;font-size:15px;outline:none}
 #input:focus{border-color:#e94560}
@@ -1150,24 +1425,56 @@ body{font-family:system-ui,sans-serif;background:#1a1a2e;color:#e0e0e0;height:10
 button{padding:10px 20px;background:#e94560;color:#fff;border:none;border-radius:20px;font-size:15px;cursor:pointer}
 button:hover{background:#c73e54}
 button:disabled{opacity:0.4;cursor:not-allowed}
+#attach{padding:10px 14px;background:#0f3460}
+#attach:hover{background:#174b82}
+body.dragging:after{content:'Drop images or GIFs to attach';position:fixed;inset:12px;display:flex;align-items:center;justify-content:center;border:3px dashed #e94560;border-radius:16px;background:rgba(26,26,46,.92);color:#fff;font-size:20px;font-weight:600;z-index:10;pointer-events:none}
 </style></head><body>
 <div id="status-banner"></div>
 <div id="messages"></div>
-<form id="form"><input id="input" placeholder="Say something..." autocomplete="off"><button type="submit">Send</button></form>
+<div id="composer">
+<div id="upload-error"></div>
+<div id="attachments"></div>
+<form id="form">
+<input id="file-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+<button id="attach" type="button" title="Attach images or GIFs">Image</button>
+<input id="input" placeholder="Say something..." autocomplete="off">
+<button id="send" type="submit">Send</button>
+</form>
+</div>
 <script>
 const div=document.getElementById('messages');
 const banner=document.getElementById('status-banner');
 const form=document.getElementById('form');
 const input=document.getElementById('input');
+const attach=document.getElementById('attach');
+const fileInput=document.getElementById('file-input');
+const attachmentDiv=document.getElementById('attachments');
+const uploadError=document.getElementById('upload-error');
 const rendered=new Set();
+const allowedTypes=new Set(['image/png','image/jpeg','image/webp','image/gif']);
+const maxImages=__CHAT_MAX_IMAGES__;
+const maxMediaBytes=__CHAT_MAX_MEDIA_BYTES__;
+let selectedFiles=[];
 let initialized=false;
+let sending=false;
+
+function escapeHTML(value){
+  return String(value??'').replace(/[&<>"']/g,ch=>({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  })[ch]);
+}
 
 function msgKey(m){
-  return m.role+'|'+m.content.slice(0,80);
+  const images=(m.images||[]).map(i=>i.url).join(',');
+  return m.role+'|'+(m.content||'').slice(0,80)+'|'+images+'|'+(m.time||'');
 }
 
 function msgHTML(m){
-  return `<div class="msg-wrap ${m.role}"><div class="role">${m.role}${m.time?' · '+m.time:''}</div><div class="msg">${m.content.replace(/</g,'&lt;')}</div></div>`;
+  const text=escapeHTML(m.content||'').replace(/\n/g,'<br>');
+  const images=(m.images||[]).map(i=>
+    `<a href="${escapeHTML(i.url)}" target="_blank" rel="noopener"><img class="chat-media" src="${escapeHTML(i.url)}" alt="${escapeHTML(i.name||'Uploaded image')}" loading="lazy"></a>`
+  ).join('');
+  return `<div class="msg-wrap ${escapeHTML(m.role)}"><div class="role">${escapeHTML(m.role)}${m.time?' · '+escapeHTML(m.time):''}</div><div class="msg">${text}<div class="media-grid">${images}</div></div></div>`;
 }
 
 function atBottom(){
@@ -1179,12 +1486,68 @@ function updateStatus(status){
     banner.textContent=status;
     banner.classList.add('show');
     input.disabled=true;
-    form.querySelector('button').disabled=true;
+    form.querySelectorAll('button').forEach(button=>button.disabled=true);
   }else{
     banner.classList.remove('show');
     input.disabled=false;
-    form.querySelector('button').disabled=false;
+    if(!sending)form.querySelectorAll('button').forEach(button=>button.disabled=false);
   }
+}
+
+function showUploadError(message=''){
+  uploadError.textContent=message;
+  uploadError.classList.toggle('show',Boolean(message));
+}
+
+function renderAttachments(){
+  attachmentDiv.innerHTML=selectedFiles.map((item,index)=>
+    `<div class="attachment"><img src="${item.url}" alt="${escapeHTML(item.file.name)}"><button type="button" data-remove="${index}" title="Remove attachment">x</button></div>`
+  ).join('');
+  attachmentDiv.classList.toggle('show',selectedFiles.length>0);
+}
+
+function clearAttachments(){
+  selectedFiles.forEach(item=>URL.revokeObjectURL(item.url));
+  selectedFiles=[];
+  fileInput.value='';
+  renderAttachments();
+}
+
+function addFiles(files){
+  showUploadError();
+  for(const file of files){
+    if(!allowedTypes.has(file.type)){
+      showUploadError(`${file.name} is not a supported image or GIF.`);
+      continue;
+    }
+    if(selectedFiles.length>=maxImages){
+      showUploadError(`You can attach up to ${maxImages} files.`);
+      break;
+    }
+    const duplicate=selectedFiles.some(item=>
+      item.file.name===file.name&&item.file.size===file.size&&item.file.lastModified===file.lastModified
+    );
+    const total=selectedFiles.reduce((sum,item)=>sum+item.file.size,0);
+    if(!duplicate&&total+file.size>maxMediaBytes){
+      showUploadError(`Attachments can total at most ${Math.floor(maxMediaBytes/1024/1024)} MB.`);
+      continue;
+    }
+    if(!duplicate)selectedFiles.push({file,url:URL.createObjectURL(file)});
+  }
+  renderAttachments();
+}
+
+function filePayload(item){
+  return new Promise((resolve,reject)=>{
+    const reader=new FileReader();
+    reader.onload=()=>resolve({
+      name:item.file.name,
+      type:item.file.type,
+      data_url:reader.result
+    });
+    reader.onerror=()=>reject(new Error(`Could not read ${item.file.name}.`));
+    reader.readAsDataURL(item.file);
+  });
 }
 
 async function refresh(){
@@ -1215,14 +1578,71 @@ async function refresh(){
 }
 setInterval(refresh,2000);
 refresh();
+attach.onclick=()=>fileInput.click();
+fileInput.onchange=()=>addFiles(fileInput.files);
+attachmentDiv.onclick=e=>{
+  const button=e.target.closest('[data-remove]');
+  if(!button)return;
+  const index=Number(button.dataset.remove);
+  const removed=selectedFiles.splice(index,1)[0];
+  if(removed)URL.revokeObjectURL(removed.url);
+  renderAttachments();
+};
+let dragDepth=0;
+document.addEventListener('dragenter',e=>{
+  if(Array.from(e.dataTransfer?.items||[]).some(item=>item.kind==='file')){
+    dragDepth++;
+    document.body.classList.add('dragging');
+  }
+});
+document.addEventListener('dragleave',()=>{
+  dragDepth=Math.max(0,dragDepth-1);
+  if(!dragDepth)document.body.classList.remove('dragging');
+});
+document.addEventListener('dragover',e=>e.preventDefault());
+document.addEventListener('drop',e=>{
+  e.preventDefault();
+  dragDepth=0;
+  document.body.classList.remove('dragging');
+  addFiles(e.dataTransfer?.files||[]);
+});
+document.addEventListener('paste',e=>{
+  const files=Array.from(e.clipboardData?.files||[]).filter(file=>allowedTypes.has(file.type));
+  if(files.length){
+    e.preventDefault();
+    addFiles(files);
+  }
+});
 form.onsubmit=async e=>{
   e.preventDefault();
   const msg=input.value.trim();
-  if(!msg)return;
-  input.value='';
-  const resp=await fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg})});
-  if(resp.ok){
+  if((!msg&&!selectedFiles.length)||sending)return;
+  sending=true;
+  showUploadError();
+  input.disabled=true;
+  form.querySelectorAll('button').forEach(button=>button.disabled=true);
+  try{
+    const images=await Promise.all(selectedFiles.map(filePayload));
+    const resp=await fetch('/chat',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({message:msg,images})
+    });
+    let data={};
+    try{data=await resp.json();}catch(e){}
+    if(!resp.ok)throw new Error(data.error||`Upload failed (${resp.status}).`);
+    input.value='';
+    clearAttachments();
     setTimeout(refresh,500);
+  }catch(error){
+    showUploadError(error.message||'Could not send that message.');
+  }finally{
+    sending=false;
+    if(!banner.classList.contains('show')){
+      input.disabled=false;
+      form.querySelectorAll('button').forEach(button=>button.disabled=false);
+      input.focus();
+    }
   }
 };
 </script></body></html>"""
@@ -1263,6 +1683,8 @@ NUDGE_PREFIXES = [
     "[Notification]",
     "The user approved your notification:",
     "Motion detected in the room!",
+    "Austin pressed the button",
+    "You've been in pomodoro mode",
 ]
 
 
@@ -1290,7 +1712,7 @@ class ChatHandler(BaseHTTPRequestHandler):
     def _require_auth(self):
         if self._check_auth():
             return True
-        if self.path == "/chat":
+        if self.path.startswith("/chat"):
             self.send_error(401)
         else:
             self._send_login()
@@ -1341,6 +1763,10 @@ class ChatHandler(BaseHTTPRequestHandler):
             if not self._require_auth():
                 return
             self._get_messages()
+        elif self.path.startswith("/chat/media/"):
+            if not self._require_auth():
+                return
+            self._get_media()
         else:
             self.send_error(404)
 
@@ -1379,12 +1805,65 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def _serve_html(self):
-        data = CHAT_HTML.encode()
+        html = (
+            CHAT_HTML
+            .replace("__CHAT_MAX_IMAGES__", str(CHAT_MAX_IMAGES_PER_MESSAGE))
+            .replace("__CHAT_MAX_MEDIA_BYTES__", str(CHAT_MAX_MEDIA_BYTES))
+        )
+        data = html.encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def _send_json(self, payload: dict, status: int = 200):
+        data = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _get_media(self):
+        media_id = self.path.removeprefix("/chat/media/").split("?", 1)[0]
+        if len(media_id) != 64 or any(c not in "0123456789abcdef" for c in media_id):
+            self.send_error(404)
+            return
+
+        orch = ChatHandler.orchestrator
+        found = None
+        with orch.ctx_lock:
+            for msg in reversed(orch.ctx.messages):
+                found = media_data_from_message(msg, media_id)
+                if found:
+                    break
+        if not found:
+            # The message may still be queued while the main loop is busy.
+            with orch.chat_queue_lock:
+                queued = list(orch.chat_queue)
+            for entry in reversed(queued):
+                if not isinstance(entry, dict):
+                    continue
+                queued_msg = {
+                    "content": entry.get("content", []),
+                    "_chat_images": entry.get("chat_images", []),
+                }
+                found = media_data_from_message(queued_msg, media_id)
+                if found:
+                    break
+        if not found:
+            self.send_error(404)
+            return
+
+        mime, raw = found
+        self.send_response(200)
+        self.send_header("Content-Type", mime)
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "private, max-age=3600")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(raw)
 
     def _get_messages(self):
         orch = ChatHandler.orchestrator
@@ -1400,7 +1879,14 @@ class ChatHandler(BaseHTTPRequestHandler):
                     ctx_user_contents.add(c.strip())
         with orch.chat_queue_lock:
             for qm in orch.chat_queue:
-                if qm.strip() not in ctx_user_contents:
+                if isinstance(qm, dict):
+                    msgs.append({
+                        "role": "user",
+                        "content": qm.get("content", ""),
+                        "_chat_images": qm.get("chat_images", []),
+                        "_ts": time.time(),
+                    })
+                elif qm.strip() not in ctx_user_contents:
                     msgs.append({"role": "user", "content": qm, "_ts": time.time()})
 
         filtered = []
@@ -1411,12 +1897,38 @@ class ChatHandler(BaseHTTPRequestHandler):
             ts_str = time.strftime("%-I:%M%p %a", time.localtime(ts)).lower().lstrip("0") if ts else ""
             if role == "user":
                 if isinstance(content, list):
-                    continue  # image messages
-                if not content or not content.strip():
-                    continue
-                if any(content.startswith(p) for p in NUDGE_PREFIXES):
-                    continue
-                filtered.append({"role": role, "content": content, "time": ts_str})
+                    text = " ".join(
+                        p.get("text", "")
+                        for p in content
+                        if isinstance(p, dict) and p.get("type") == "text"
+                    ).strip()
+                    images = [
+                        {
+                            "url": f"/chat/media/{a['id']}",
+                            "name": a.get("name", "image"),
+                            "type": a.get("type", ""),
+                        }
+                        for a in m.get("_chat_images", [])
+                        if isinstance(a, dict) and a.get("id")
+                    ]
+                    if text or images:
+                        filtered.append({
+                            "role": role,
+                            "content": text,
+                            "images": images,
+                            "time": ts_str,
+                        })
+                else:
+                    if not content or not content.strip():
+                        continue
+                    display_content = m.get("_chat_original_text", content)
+                    if any(display_content.startswith(p) for p in NUDGE_PREFIXES):
+                        continue
+                    filtered.append({
+                        "role": role,
+                        "content": display_content,
+                        "time": ts_str,
+                    })
             elif role == "assistant":
                 # Show display updates and chat messages
                 for tc in m.get("tool_calls", []):
@@ -1430,24 +1942,53 @@ class ChatHandler(BaseHTTPRequestHandler):
                         except (json.JSONDecodeError, KeyError):
                             pass
 
-          # Return last 50 messages
+        # Return last 50 messages
         filtered = filtered[-50:]
         with orch.status_lock:
             status = orch.status_message
-        data = json.dumps({"messages": filtered, "status": status}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        self._send_json({"messages": filtered, "status": status})
 
     def _post_message(self):
-        length = int(self.headers.get("Content-Length", 0))
-        body = json.loads(self.rfile.read(length))
-        message = body.get("message", "").strip()
-
-        if not message:
-            self.send_error(400, "Empty message")
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            self._send_json({"error": "Invalid Content-Length"}, 400)
+            return
+        if length <= 0:
+            self._send_json({"error": "Empty request"}, 400)
+            return
+        if length > CHAT_MAX_REQUEST_BYTES:
+            self.close_connection = True
+            self._send_json(
+                {
+                    "error": (
+                        f"Upload is too large. The attachment limit is "
+                        f"{CHAT_MAX_MEDIA_BYTES // (1024 * 1024)} MB."
+                    )
+                },
+                413,
+            )
+            return
+        try:
+            body = json.loads(self.rfile.read(length))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self._send_json({"error": "Invalid JSON"}, 400)
+            return
+        if not isinstance(body, dict):
+            self._send_json({"error": "Request body must be a JSON object"}, 400)
+            return
+        raw_message = body.get("message", "")
+        if not isinstance(raw_message, str):
+            self._send_json({"error": "message must be a string"}, 400)
+            return
+        message = raw_message.strip()
+        try:
+            content, chat_images = build_chat_message(
+                message,
+                body.get("images", []),
+            )
+        except ChatMediaError as e:
+            self._send_json({"error": str(e)}, e.status_code)
             return
 
         orch = ChatHandler.orchestrator
@@ -1472,17 +2013,19 @@ class ChatHandler(BaseHTTPRequestHandler):
         with orch.chat_queue_lock:
             if approval_notice:
                 orch.chat_queue.append(approval_notice)
-            orch.chat_queue.append(message)
+            if chat_images:
+                orch.chat_queue.append({
+                    "content": content,
+                    "chat_images": chat_images,
+                })
+            else:
+                orch.chat_queue.append(content)
         orch.chat_event.set()
         orch.presence.touch()
-        info(f"[CHAT] User message: {message[:100]}")
+        media_log = f", {len(chat_images)} attachment(s)" if chat_images else ""
+        info(f"[CHAT] User message: {message[:100] or '[media only]'}{media_log}")
 
-        data = json.dumps({"status": "ok"}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        self._send_json({"status": "ok"})
 
 
 def main():

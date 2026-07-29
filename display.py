@@ -37,6 +37,7 @@ class Display:
 
         self.font_bold_lg = self._load_font(FONT_BOLD, 22)
         self.font_bold_md = self._load_font(FONT_BOLD, 16)
+        self.font_huge = self._load_font(FONT_BOLD, 56)
         self.font_regular = self._load_font(FONT_REGULAR, 14)
         self.font_small = self._load_font(FONT_REGULAR, 10)
 
@@ -95,6 +96,35 @@ class Display:
         self._last_refresh = time.monotonic()
         info(f"[DISPLAY] Refreshed: '{text[:50]}'")
 
+
+    def show_pomodoro(self, count: int, ends_str: str):
+        """Focus screen: big cycle count for today plus when the current block ends."""
+        elapsed = time.monotonic() - self._last_refresh
+        if elapsed < MIN_REFRESH_INTERVAL:
+            wait = MIN_REFRESH_INTERVAL - elapsed
+            info(f"[DISPLAY] Waiting {wait:.1f}s for e-ink cooldown")
+            time.sleep(wait)
+
+        self.epd.fill(Adafruit_EPD.WHITE)
+        image = Image.new("RGB", (self.width, self.height), color=self.WHITE)
+        draw = ImageDraw.Draw(image)
+
+        header = "POMODOROS TODAY"
+        hb = self.font_bold_md.getbbox(header)
+        draw.text(((self.width - hb[2]) // 2, 4), header, font=self.font_bold_md, fill=self.BLACK)
+
+        num = str(count)
+        nb = self.font_huge.getbbox(num)
+        draw.text(((self.width - nb[2]) // 2, 24), num, font=self.font_huge, fill=self.BLACK)
+
+        footer = f"block ends {ends_str}" if ends_str else "focus"
+        fb = self.font_regular.getbbox(footer)
+        draw.text(((self.width - fb[2]) // 2, self.height - 20), footer, font=self.font_regular, fill=self.BLACK)
+
+        self.epd.image(image)
+        self.epd.display()
+        self._last_refresh = time.monotonic()
+        info(f"[DISPLAY] Pomodoro screen: {count} today, ends {ends_str}")
 
     def show_booting(self):
         self.show_text("Waking up...")

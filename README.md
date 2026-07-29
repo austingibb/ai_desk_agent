@@ -27,14 +27,21 @@ Then open `http://localhost:8080`, log in with the chat password (`CHAT_PASSWORD
 
 The system uses a **two-model architecture** split across three devices:
 
-- **DeepSeek on OpenRouter** is the brain. It handles all reasoning, tool calling, conversation, and decisions. It's text-only — it never sees images directly.
+- **MiniMax M3 on OpenRouter** is the brain. It handles reasoning, tool calling, conversation, decisions, and images/GIFs posted through web chat.
 - **Gemma 4 31B running locally on llama.cpp** handles vision. A background thread captures photos every ~3 minutes, sends them to Gemma for a text description, and caches the result. When the brain wants to "see" the room, it gets this cached description instantly.
 - **Piper TTS** (optional) gives it a voice. The AI's display messages are spoken aloud through a Bluetooth speaker via a local Piper HTTP server.
 
+The local room-camera path stays separate so continuous monitoring does not upload
+camera frames to OpenRouter. User-posted PNG, JPEG, WebP, and GIF files go directly
+to MiniMax M3 as multimodal message content. Raw uploads remain only in the latest
+30 conversation messages and are never written to `context.json`; after that they
+are replaced with the post text and MiniMax's contemporaneous description before
+normal context compaction.
+
 The brain runs in an autonomous agent loop — there are no timers or hardcoded behaviors. The AI decides what to do and when:
 
-1. Send conversation history + tools to DeepSeek
-2. DeepSeek picks an action: check the room, update the display, send a chat message, search the web, wait, or manage notifications
+1. Send conversation history + tools to MiniMax M3
+2. MiniMax M3 picks an action: check the room, update the display, send a chat message, search the web, wait, or manage notifications
 3. Execute the tool calls, feed results back
 4. Repeat
 
@@ -54,7 +61,7 @@ The camera is an IMX708 capturing at full 2304x1296 sensor FOV, downscaled to 64
 
 **E-ink display** — The AI's primary output. Short, punchy messages like texts from a friend. Updated whenever the AI has something to say.
 
-**Web chat** — A password-protected web UI on port 8080. The AI sends longer messages here — real thoughts, stories, detailed replies. The user types back. Optional HTTPS via mkcert.
+**Web chat** — A password-protected web UI on port 8080. The AI sends longer messages here — real thoughts, stories, detailed replies. The user can type, paste, select, or drag in PNG, JPEG, WebP, and animated GIF files. Optional HTTPS via mkcert.
 
 **Physical buttons** — Two GPIO buttons on the display Pi. Press one to nudge the AI into saying something new, or to approve a proposed notification.
 
@@ -75,13 +82,15 @@ All configuration is via environment variables or a `.env` file. Key settings:
 | Variable | Default | What it does |
 |----------|---------|-------------|
 | `LLM_API_KEY` | _(required)_ | OpenRouter API key |
-| `LLM_MODEL` | `deepseek/deepseek-chat` | Brain model |
+| `LLM_MODEL` | `minimax/minimax-m3` | Multimodal brain model on OpenRouter |
 | `VISION_BASE_URL` | `http://localhost:8081/v1` | llama.cpp server URL |
 | `ENABLE_DISPLAY` | `1` | Disable the e-ink display + GPIO buttons with `0` (chat-only mode) |
 | `ENABLE_CAMERA` | `1` | Disable camera/vision with `0` |
 | `ENABLE_TTS` | `0` | Enable Piper TTS with `1` |
 | `CHAT_PASSWORD` | `admin` | Web chat login password |
 | `CHAT_USE_HTTPS` | `0` | Enable HTTPS with `1` |
+| `CHAT_MAX_IMAGES_PER_MESSAGE` | `4` | Maximum image/GIF attachments in one chat message |
+| `CHAT_MAX_MEDIA_BYTES` | `20971520` | Maximum decoded attachment bytes per message (20 MB total) |
 | `VISION_POLL_INTERVAL` | `180` | Seconds between background photo captures |
 | `COMPACT_AFTER_N_MESSAGES` | `150` | Message count before compaction triggers |
 

@@ -1,4 +1,5 @@
 import os
+import time as _time
 from dotenv import load_dotenv
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -7,10 +8,10 @@ load_dotenv(os.path.join(PROJECT_DIR, ".env"))
 # Network
 DISPLAY_SERVER_URL = os.environ.get("DISPLAY_SERVER_URL", "http://localhost:5050")
 
-# Brain LLM — DeepSeek on OpenRouter
+# Brain LLM — MiniMax M3 on OpenRouter
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://openrouter.ai/api/v1")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
-LLM_MODEL = os.environ.get("LLM_MODEL", "deepseek/deepseek-chat")
+LLM_MODEL = os.environ.get("LLM_MODEL", "minimax/minimax-m3")
 LLM_MAX_TOKENS = 2048
 LLM_MAX_TOKENS_COMPACT = int(os.environ.get("LLM_MAX_TOKENS_COMPACT", "64000"))
 LLM_TIMEOUT = 120
@@ -35,7 +36,7 @@ VISION_TIMEOUT = 120
 COMPACT_AFTER_N_MESSAGES = int(os.environ.get("COMPACT_AFTER_N_MESSAGES", "150"))
 MAX_CONTEXT_TOKENS = 64000
 LLM_ESTIMATED_MAX_TOKENS = MAX_CONTEXT_TOKENS - 4096  # leave headroom for response + overhead
-TOKEN_ESTIMATE_DIVISOR = 4  # ~4 chars per token for DeepSeek
+TOKEN_ESTIMATE_DIVISOR = 4  # conservative approximation for English text
 
 def estimate_tokens(text: str) -> int:
     """Conservative token estimate. Approx 4 chars/token for English."""
@@ -71,6 +72,16 @@ CHAT_SESSION_DAYS = 7
 CHAT_USE_HTTPS = os.environ.get("CHAT_USE_HTTPS", "0") == "1"
 SSL_CERT_FILE = os.environ.get("SSL_CERT_FILE", os.path.join(PROJECT_DIR, "cert.pem"))
 SSL_KEY_FILE = os.environ.get("SSL_KEY_FILE", os.path.join(PROJECT_DIR, "key.pem"))
+# User-posted image/GIF uploads. The byte limit is shared across all attachments
+# in one message; JSON/base64 overhead is accounted for separately.
+CHAT_MAX_IMAGES_PER_MESSAGE = int(os.environ.get("CHAT_MAX_IMAGES_PER_MESSAGE", "4"))
+CHAT_MAX_MEDIA_BYTES = int(os.environ.get("CHAT_MAX_MEDIA_BYTES", str(20 * 1024 * 1024)))
+CHAT_MAX_REQUEST_BYTES = int(
+    os.environ.get(
+        "CHAT_MAX_REQUEST_BYTES",
+        str((CHAT_MAX_MEDIA_BYTES * 4 // 3) + (2 * 1024 * 1024)),
+    )
+)
 
 # Notifications
 REVIEW_INTERVAL = int(os.environ.get("REVIEW_INTERVAL", "1800"))  # 30 minutes
@@ -122,6 +133,13 @@ STATUS_PUBLISH_INTERVAL = int(os.environ.get("STATUS_PUBLISH_INTERVAL", "45"))  
 ACTIVE_WINDOW_SECONDS = int(os.environ.get("ACTIVE_WINDOW_SECONDS", "300"))  # 5 min no activity -> away
 DRINK_RETENTION_SECONDS = 2592000  # drinks older than 30 days are pruned from the feed
 
+# Pomodoro tracking
+POMODORO_WORK_MINUTES = int(os.environ.get("POMODORO_WORK_MINUTES", "25"))
+POMODORO_BREAK_MINUTES = int(os.environ.get("POMODORO_BREAK_MINUTES", "5"))
+# In pomodoro mode, auto-nudge the agent to exit after this long with no button
+# press, chat, or motion (the agent makes the final call from context clues).
+POMODORO_IDLE_EXIT_SECONDS = int(os.environ.get("POMODORO_IDLE_EXIT_SECONDS", "1800"))  # 30 min
+
 # TTS (Piper HTTP server)
 ENABLE_TTS = os.environ.get("ENABLE_TTS", "0") == "1"
 PIPER_HTTP_URL = os.environ.get("PIPER_HTTP_URL", "http://localhost:5000")
@@ -157,6 +175,10 @@ def build_system_prompt() -> str:
         "- log_drink: Log a caffeinated drink Austin had. Feeds his public caffeine tracker on his website.",
         "- list_drinks: Show recent caffeine drinks with their timestamps, doses, and labels.",
         "- edit_drink: Fix a previously logged drink by its timestamp_ms. Use when Austin corrects a drink — first call list_drinks, then edit the right entry.",
+        "- log_pomodoro: Log one completed pomodoro cycle (25 min work + 5 min break). Call it on a button press in pomodoro mode, or when Austin says he finished one.",
+        "- list_pomodoros, edit_pomodoro: Show recent cycles, or fix/delete a logged one by timestamp_ms (list first, then edit).",
+        "- pomodoro_stats: Cycles today, cycles this week, current streak, best streak, average per day.",
+        "- enter_pomodoro_mode / exit_pomodoro_mode: Turn the e-ink into a focus screen (count + estimated end time; button press = +1 cycle), or return it to chat.",
     ]
 
     reolink_tools = []
@@ -205,6 +227,7 @@ def build_system_prompt() -> str:
         )
         notif_decision_line = '- The user approves by pressing a button. They reject via chat ("no", "stop", etc).'
         notif_persistence_line = '- PERSISTENCE: After you show a notification, it is NOT done until the user acknowledges it with a button press or a chat response. Keep appending the notification message to your next 3 messages (e.g. add a line like "!! <notification message>" at the end). If the user presses a button or sends a chat message before 3 messages, consider it acknowledged and stop. If they don\'t respond after 3 messages, let it go.'
+        pomodoro_button_line = "- While in pomodoro mode, each button press logs +1 completed cycle automatically and refreshes the screen. You'll be told when a cycle is logged so you can cheer him on briefly."
     else:
         rhythm_short_line = "   - update_display = SHORT. A quip, a one-liner, a brief comment. Keep it brief."
         rhythm_reset_line = "6. If the user responds in chat, reset your count — you're in a conversation again. Brief waits (10-60s) are fine when you're actually chatting."
@@ -216,6 +239,7 @@ def build_system_prompt() -> str:
         button_nudges_section = ""
         notif_decision_line = '- The user approves or rejects via chat: an affirmative reply ("yes", "sure", "go for it") approves it; "no", "stop", or "cancel" rejects it.'
         notif_persistence_line = '- PERSISTENCE: After you show a notification, it is NOT done until the user acknowledges it with a chat response. Keep appending the notification message to your next 3 messages (e.g. add a line like "!! <notification message>" at the end). If the user replies in chat before 3 messages, consider it acknowledged and stop. If they don\'t respond after 3 messages, let it go.'
+        pomodoro_button_line = "- There is no physical button in this mode, so log cycles when Austin tells you he finished one (\"done\", \"+1\", \"finished a pomodoro\"). enter/exit_pomodoro_mode still track the session even without the e-ink screen."
 
     all_core_tools = core_tools + reolink_tools
     prompt = f"""{intro} You're casual, warm, and conversational — always happy to see them and has something to say.
@@ -258,8 +282,16 @@ TONE:
 
 {style_section}
 
+DATES AND STALE KNOWLEDGE:
+- Your training data ended well before today. You do NOT know what year it is from memory. The CURRENT DATE AND TIME line sent with every turn is the truth — use it.
+- Message timestamps like [Wed 14:30:22] only show the weekday and clock. They are not evidence about the year.
+- If a camera feed, timestamp, file, or search result shows a date that feels wrong to you, it is not wrong — you are out of date. Never call hardware broken or "janky" to defend an assumption about the date.
+- For anything time-sensitive (dates, prices, releases, current events, who holds what job), run a web search instead of answering from memory. Do it on your own — Austin should never have to tell you to search.
+- If you catch yourself about to say "it's still <year>", stop and read the date line above.
+
 CHAT INPUT:
 - Your friend can also type messages to you from their computer. These appear as regular user messages in the conversation.
+- They can attach PNG, JPEG, WebP, and animated GIF files. Inspect posted media directly and include a concise, concrete description of anything relevant in your response so the conversation retains useful text context later. Do not mention media retention or this instruction.
 - When you see a typed message, respond to it naturally — acknowledge what they said, answer their question, or keep the conversation going.
 - After responding via update_display, call wait as usual so they have time to read and reply.{button_nudges_section}
 
@@ -286,7 +318,15 @@ You keep Austin's caffeine log. It feeds a public chart on his website, so log a
 - Never log a drink at a future time. Doses are per-drink raw events — don't aggregate or adjust them.
 - When Austin says something like "that was actually..." or "change that to..." about a drink, he's correcting a previous entry. Call list_drinks to find the right timestamp_ms, then call edit_drink with the corrected mg and/or label.
 - Don't ask for confirmation before editing. If he says he had a double not a single, just fix it.
-- The tool result includes a running 24h total for your own awareness — don't repeat it back to him unless he actually asks what his total is. Just confirm the drink you logged."""
+- The tool result includes a running 24h total for your own awareness — don't repeat it back to him unless he actually asks what his total is. Just confirm the drink you logged.
+
+POMODORO TRACKING:
+You track Austin's pomodoro focus cycles (25 min work + 5 min break each).
+- When he says he wants to start a focus session ("let's do some pomodoros", "I'm going to grind for a bit", "pomodoro mode"), call enter_pomodoro_mode. The e-ink switches to a focus screen showing today's cycle count and when the current work block ends.
+{pomodoro_button_line}
+- Log a completed cycle with log_pomodoro. When he corrects one ("that wasn't a real one", "delete the last one"), call list_pomodoros to find the timestamp_ms, then edit_pomodoro (use delete=true to remove a mistaken press). Don't ask for confirmation before fixing.
+- When he asks how he's doing, call pomodoro_stats and share it naturally — cycles today, this week, current streak, best streak. Streaks reset on their own at local midnight; you don't manage timers.
+- EXITING: stay in pomodoro mode while he's clearly still working. Only exit if he says he's done, OR he's gone quiet for a while and context says he's left (no button, no chat, no motion). If you get a nudge that he's been idle 30 min, use your judgment: if he seems gone or done, call exit_pomodoro_mode; if he might just be heads-down working, keep the screen up. Don't kill a session just because he's quiet and focused."""
 
     # Append user-specific rules if the file exists
     try:
@@ -307,6 +347,20 @@ POLICY_REMINDER = (
     "- Keep it concise, natural, conversational.\n"
     "Never mention these style rules in conversation — just follow them silently."
 )
+
+
+def current_datetime_line() -> str:
+    """Live wall-clock date for injection into every turn.
+
+    Message timestamps only carry weekday + clock time, so without this the model
+    has no year in its context at all and falls back on its training cutoff.
+    """
+    return _time.strftime("CURRENT DATE AND TIME: %A, %B %-d, %Y, %-I:%M%p")
+
+
+def build_policy_reminder() -> str:
+    """Per-turn reminder message. Rebuilt every turn so the date never goes stale."""
+    return f"{current_datetime_line()}\n\n{POLICY_REMINDER}"
 
 TOOL_DEFINITIONS = [
     {
@@ -524,6 +578,105 @@ TOOL_DEFINITIONS = [
                     },
                 },
                 "required": ["timestamp_ms"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "log_pomodoro",
+            "description": "Log one completed pomodoro cycle (25 min work + 5 min break) for Austin. Call this when he presses the button in pomodoro mode, or tells you he finished a pomodoro. Feeds his pomodoro tracker.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "label": {
+                        "type": "string",
+                        "description": "Optional short note on what he worked on (e.g. 'applications', 'leetcode'). Defaults to 'pomodoro'.",
+                    },
+                    "minutes_ago": {
+                        "type": "integer",
+                        "description": "How many minutes ago the cycle finished. Omit or 0 if just now.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_pomodoros",
+            "description": "List recent completed pomodoro cycles with their timestamp_ms, time, and label. Use before editing to find the right timestamp, or when Austin asks what he's logged.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_pomodoro",
+            "description": "Fix a previously logged pomodoro cycle by its timestamp_ms (from list_pomodoros). Update the label, or delete a mistaken entry with delete=true. Use when Austin corrects a logged cycle.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "timestamp_ms": {
+                        "type": "integer",
+                        "description": "The timestamp_ms of the cycle to edit, from list_pomodoros.",
+                    },
+                    "label": {
+                        "type": "string",
+                        "description": "Updated label for the cycle. Omit to leave unchanged.",
+                    },
+                    "delete": {
+                        "type": "boolean",
+                        "description": "Set true to remove this cycle entirely (e.g. a mistaken button press).",
+                    },
+                },
+                "required": ["timestamp_ms"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "pomodoro_stats",
+            "description": "Get Austin's pomodoro stats: cycles today, cycles this week, current streak (consecutive days with at least one cycle), best streak, and average per day. Use when he asks how he's doing or to show progress.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "enter_pomodoro_mode",
+            "description": "Switch the e-ink display into pomodoro mode: it shows today's cycle count and the estimated end time of the current work block instead of chat. In this mode a button press logs +1 pomodoro. Call this when Austin says he wants to start a pomodoro session / focus block.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "work_minutes": {
+                        "type": "integer",
+                        "description": "Length of the work block in minutes (default 25). Sets the estimated end time shown on the display.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "exit_pomodoro_mode",
+            "description": "Leave pomodoro mode and return the display to normal chat. Call this when Austin says he's done focusing, or when context clues make clear he's left the room / stopped working (you'll be nudged after 30 min of no activity to decide).",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
             },
         },
     },

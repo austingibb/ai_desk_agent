@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Brain harvesting script — analyze context.json for mistakes and improvement opportunities.
+"""Memory harvesting script — analyze context.json for mistakes and improvement opportunities.
 
 Reads the full conversation history, chunks it, and sends each chunk to the LLM
 for analysis. Outputs a report of mistakes made and opportunities for improvement.
 
 Usage:
-    python3 harvest_brain.py                    # analyze context.json, print report
-    python3 harvest_brain.py -o report.md       # write report to file
-    python3 harvest_brain.py --context other.json  # use a different context file
+    python3 harvest_memory.py                    # analyze context.json, print report
+    python3 harvest_memory.py -o report.md       # write report to file
+    python3 harvest_memory.py --context other.json  # use a different context file
 """
 
 import argparse
@@ -147,7 +147,7 @@ Here is the conversation log:
 """
 
 SYNTHESIS_PROMPT = """\
-You are synthesizing multiple analysis chunks from a brain harvesting session.
+You are synthesizing multiple analysis chunks from a memory harvesting session.
 Each chunk analyzed a portion of an AI assistant's conversation history with its user Austin.
 
 Combine the chunk analyses into a single coherent report. Deduplicate, prioritize the most important findings, and organize clearly.
@@ -175,8 +175,8 @@ Here are the chunk analyses:
 """
 
 
-def harvest(context_file: str, verbose: bool = False) -> str:
-    """Run the full brain harvest pipeline. Returns the final report."""
+def harvest_memory(context_file: str, verbose: bool = False) -> str:
+    """Run the full memory harvest pipeline. Returns the final report."""
     # Load context
     if not os.path.exists(context_file):
         print(f"Error: {context_file} not found", file=sys.stderr)
@@ -270,7 +270,7 @@ def harvest(context_file: str, verbose: bool = False) -> str:
             report = "# Synthesis Failed\n\nIndividual chunk analyses:\n\n" + "\n\n---\n\n".join(analyses)
 
     # Add header
-    header = f"# Brain Harvest Report\n\nGenerated: {time.strftime('%Y-%m-%d %H:%M')}\n"
+    header = f"# Memory Harvest Report\n\nGenerated: {time.strftime('%Y-%m-%d %H:%M')}\n"
     header += f"Source: {context_file}\n"
     header += f"Messages analyzed: {len(messages)}\n"
     if timestamps:
@@ -281,7 +281,7 @@ def harvest(context_file: str, verbose: bool = False) -> str:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Harvest brain from AI conversation context")
+    parser = argparse.ArgumentParser(description="Harvest memories from AI conversation context")
     parser.add_argument("--context", "-c", default=os.path.join(PROJECT_DIR, "context.json"),
                         help="Path to context.json (default: %(default)s)")
     parser.add_argument("--output", "-o", default=None,
@@ -290,7 +290,7 @@ def main():
                         help="Show chunk details")
     args = parser.parse_args()
 
-    report = harvest(args.context, verbose=args.verbose)
+    report = harvest_memory(args.context, verbose=args.verbose)
 
     if args.output:
         with open(args.output, "w") as f:

@@ -1,5 +1,6 @@
 """Conversation context manager with timestamped messages and message-count-based compaction."""
 
+import copy
 import json
 import os
 import time as _time
@@ -22,12 +23,13 @@ class Context:
         self.messages = []
 
     def save(self):
-        """Save messages to disk, stripping image data."""
+        """Save messages to disk, replacing image bytes with text context."""
         to_save = []
         for m in self.messages:
             if self._is_image_message(m):
-                continue
-            to_save.append(m)
+                to_save.append(self._demoted_image_message(m))
+            else:
+                to_save.append(m)
         try:
             with open(CONTEXT_FILE, "w") as f:
                 json.dump(to_save, f)
@@ -124,8 +126,13 @@ class Context:
     def add_system(self, content: str):
         self.messages.append({"role": "system", "content": content, "_ts": self._now()})
 
-    def add_user(self, content: str):
-        self.messages.append({"role": "user", "content": content, "_ts": self._now()})
+    def add_user(self, content, chat_images: list | None = None):
+        msg = {"role": "user", "content": content, "_ts": self._now()}
+        if chat_images:
+            # Private UI metadata. get_messages() strips underscore-prefixed
+            # fields before sending the conversation to the model.
+            msg["_chat_images"] = chat_images
+        self.messages.append(msg)
 
     def add_image(self, photo_uri: str):
         self.messages = [m for m in self.messages if not self._is_image_message(m)]
@@ -137,6 +144,79 @@ class Context:
             ],
             "_ts": self._now(),
         })
+
+    def note_latest_image_response(self, response_text: str) -> bool:
+        """Attach the model's first visible response to the latest image post.
+
+        This becomes the durable text description once raw media ages out of the
+        30-message recent window. It is private metadata until demotion.
+        """
+        response_text = (response_text or "").strip()[:2000]
+        if not response_text:
+            return False
+        for msg in reversed(self.messages):
+            if self._is_image_message(msg):
+                if not msg.get("_media_description"):
+                    msg["_media_description"] = response_text
+                    return True
+                return False
+            if msg.get("role") == "user":
+                return False
+        return False
+
+    def _demoted_image_message(self, msg: dict) -> dict:
+        """Return a text-only copy of an image post for long-term context."""
+        content = msg.get("content", [])
+        text = " ".join(
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        ).strip()
+        attachments = msg.get("_chat_images", [])
+        labels = []
+        for attachment in attachments:
+            if not isinstance(attachment, dict):
+                continue
+            kind = "animated GIF" if attachment.get("type") == "image/gif" else "image"
+            name = str(attachment.get("name", "")).strip()
+            labels.append(f"{kind} {name!r}" if name else kind)
+        media_label = ", ".join(labels) if labels else "image attachment"
+        description = str(msg.get("_media_description", "")).strip()
+
+        notes = [f"[Previously attached {media_label}; raw media discarded.]"]
+        if description:
+            notes.append(f"[Assistant's description/response at the time: {description}]")
+        durable_text = "\n".join(part for part in [text, *notes] if part)
+
+        result = {
+            k: copy.deepcopy(v)
+            for k, v in msg.items()
+            if k not in ("content", "_chat_images", "_media_description")
+        }
+        result["content"] = durable_text
+        if attachments:
+            # Keep compaction-only annotations out of the user-facing chat log.
+            result["_chat_original_text"] = text
+        return result
+
+    def demote_old_images(self, keep_last: int = KEEP_LAST_N_MESSAGES) -> int:
+        """Discard raw media outside the recent-message window.
+
+        Only the latest ``keep_last`` conversation messages may retain image
+        bytes and be sent to the model as multimodal context.
+        """
+        cutoff = max(0, len(self.messages) - max(0, keep_last))
+        demoted = 0
+        for index in range(cutoff):
+            if self._is_image_message(self.messages[index]):
+                self.messages[index] = self._demoted_image_message(self.messages[index])
+                demoted += 1
+        if demoted:
+            info(
+                f"[CONTEXT] Discarded raw media from {demoted} message(s) "
+                f"outside the latest {keep_last}"
+            )
+        return demoted
 
     def add_assistant(self, response: dict):
         tool_calls = response.get("tool_calls", [])
@@ -161,6 +241,11 @@ class Context:
             }
             for tc in tool_calls
         ]
+        # OpenRouter reasoning models require these opaque details to be passed
+        # back unchanged when a tool call continues across requests.
+        reasoning_details = response.get("reasoning_details")
+        if reasoning_details:
+            msg["reasoning_details"] = copy.deepcopy(reasoning_details)
         self.messages.append(msg)
 
     def add_tool_result(self, tool_call_id: str, name: str, result: dict):
@@ -175,7 +260,13 @@ class Context:
     def get_messages(self) -> list:
         result = []
         for m in self.messages:
-            msg = {k: v for k, v in m.items() if not k.startswith("_")}
+            # Deep-copy multipart content before timestamp injection. A shallow
+            # copy would mutate the stored text part on every agent turn.
+            msg = {
+                k: copy.deepcopy(v)
+                for k, v in m.items()
+                if not k.startswith("_")
+            }
             ts = m.get("_ts")
             if ts and msg.get("role") != "system":
                 ts_str = _ts_fmt(ts)
@@ -204,6 +295,11 @@ class Context:
                 total += max(1, len(content) // TOKEN_ESTIMATE_DIVISOR)
             for tc in msg.get("tool_calls", []):
                 total += max(1, len(json.dumps(tc)) // TOKEN_ESTIMATE_DIVISOR)
+            if msg.get("reasoning_details"):
+                total += max(
+                    1,
+                    len(json.dumps(msg["reasoning_details"])) // TOKEN_ESTIMATE_DIVISOR,
+                )
         return total
 
     @staticmethod
@@ -381,6 +477,12 @@ class Context:
         end = self._find_safe_end(start, end)
         if end <= start:
             return None
+
+        # A safe tool-call boundary can extend slightly into the nominal recent
+        # window. Ensure every image entering compaction has already become text.
+        for index in range(start, end):
+            if self._is_image_message(self.messages[index]):
+                self.messages[index] = self._demoted_image_message(self.messages[index])
 
         window = self.messages[start:end]
 

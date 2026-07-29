@@ -86,6 +86,22 @@ class DisplayHandler(BaseHTTPRequestHandler):
                     self._send_json({"status": "ok"})
                 except Exception as e:
                     self._send_json({"error": str(e)}, 500)
+        elif self.path == "/display/pomodoro":
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length)
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError:
+                self._send_json({"error": "invalid json"}, 400)
+                return
+            count = int(data.get("count", 0))
+            ends = data.get("ends", "")
+            with DISPLAY_LOCK:
+                try:
+                    display.show_pomodoro(count, ends)
+                    self._send_json({"status": "ok"})
+                except Exception as e:
+                    self._send_json({"error": str(e)}, 500)
         elif self.path == "/buttons/reset":
             with button_state_lock:
                 button_state["button"] = None

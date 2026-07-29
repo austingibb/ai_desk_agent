@@ -1,4 +1,4 @@
-"""LLM API clients — DeepSeek on OpenRouter (brain) + local Gemma (vision)."""
+"""LLM API clients — MiniMax M3 on OpenRouter (brain) + local Gemma (vision)."""
 
 import json
 import re
@@ -60,7 +60,7 @@ def _clean(text: str) -> str:
 
 
 class AIClient:
-    """Brain LLM — DeepSeek on OpenRouter for reasoning and tool calling."""
+    """Brain LLM — MiniMax M3 on OpenRouter for multimodal reasoning and tools."""
 
     def __init__(self):
         self.base_url = LLM_BASE_URL.rstrip("/")
@@ -107,15 +107,19 @@ class AIClient:
             })
 
         content = (msg.get("content") or "").strip()
+        reasoning = msg.get("reasoning") or msg.get("reasoning_content") or ""
+        if not isinstance(reasoning, str):
+            reasoning = str(reasoning)
         return {
             "content": content,
-            "reasoning": (msg.get("reasoning_content") or "").strip(),
+            "reasoning": reasoning.strip(),
+            "reasoning_details": msg.get("reasoning_details") or [],
             "tool_calls": tool_calls,
             "raw_message": msg,
         }
 
     def compact(self, text: str) -> str:
-        """Summarize old context using DeepSeek."""
+        """Summarize old context using the configured brain model."""
         prompt = (
             f"{_PURPOSE}\n\n"
             "You are compacting a block of conversation history into a short summary for the AI's long-term memory.\n"
@@ -161,7 +165,7 @@ class AIClient:
         return resp["choices"][0]["message"]["content"].strip()
 
     def merge_summaries(self, summaries_text: str) -> list:
-        """Merge summaries using DeepSeek. Single call — DeepSeek v4 Pro output is 384K tokens."""
+        """Merge summaries using the configured brain model."""
         info(f"[LLM] merge_summaries: {len(summaries_text)} chars input, targeting <= {MERGE_SUMMARIES_TARGET} summaries")
         prompt = _MERGE_PROMPT.format(
             target=MERGE_SUMMARIES_TARGET,
