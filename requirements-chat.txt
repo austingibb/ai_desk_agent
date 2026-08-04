@@ -5,5 +5,5 @@ Pillow
 python-dotenv
 
 # Optional extras:
-#   boto3   — only if you enable the public caffeine feed (STATUS_S3_BUCKET set)
-#   numpy   — only if you run camera-on (ENABLE_CAMERA=1) with a webcam + vision server
+#   boto3 — only if you enable the public caffeine feed (STATUS_S3_BUCKET set)
+# For webcam mode on macOS, install requirements-mac.txt instead.

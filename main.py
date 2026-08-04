@@ -48,6 +48,7 @@ from config import (
     SCENE_PCT_THRESHOLD,
     SCENE_MAX_STALE_SECONDS,
     ENABLE_REOLINK,
+    ENABLE_WEB_SEARCH,
     REOLINK_IP,
     REOLINK_USER,
     REOLINK_PASSWORD,
@@ -109,8 +110,8 @@ def _visible_response_text(response: dict) -> str:
 class Orchestrator:
     def __init__(self):
         self.ctx = Context()
-        # Camera pulls in picamera2 (Pi-only) — import it lazily so the agent
-        # still runs on a plain laptop with ENABLE_CAMERA=0.
+        # Import camera dependencies lazily so camera-off chat mode stays light.
+        # Camera itself selects picamera2 on Pi and OpenCV on macOS.
         if ENABLE_CAMERA:
             from camera import Camera
             self.camera = Camera()
@@ -151,6 +152,9 @@ class Orchestrator:
         # Vision background thread state
         self.latest_scene = None  # {"description": str, "timestamp": float}
         self.scene_lock = threading.Lock()
+        # Acquire before capture so a request waiting behind another inference
+        # takes a fresh frame instead of eventually submitting a stale one.
+        self.vision_job_lock = threading.Lock()
         self.motion_event = threading.Event()
         self.motion_description = ""
         if ENABLE_CAMERA:
@@ -187,14 +191,17 @@ class Orchestrator:
             info(f"[AUTH] Generated new session token")
         info(f"[AUTH] Password: {'***' if CHAT_PASSWORD != 'admin' else 'admin (default)'}, session lasts {CHAT_SESSION_DAYS} days")
 
-        try:
-            info("Init MCP client...")
-            self.mcp = MCPClient()
-            tools = self.mcp.initialize()
-            self.mcp_tools = self.mcp.get_tool_definitions()
-            info(f"[MCP] Discovered {len(tools)} tools: {[t['name'] for t in tools]}")
-        except Exception as e:
-            info(f"[MCP] Unavailable: {e}")
+        if ENABLE_WEB_SEARCH:
+            try:
+                info("Init MCP client...")
+                self.mcp = MCPClient()
+                tools = self.mcp.initialize()
+                self.mcp_tools = self.mcp.get_tool_definitions()
+                info(f"[MCP] Discovered {len(tools)} tools: {[t['name'] for t in tools]}")
+            except Exception as e:
+                info(f"[MCP] Unavailable: {e}")
+        else:
+            info("[MCP] Web search disabled (ENABLE_WEB_SEARCH=0)")
 
         signal.signal(signal.SIGINT, self._handle_signal)
         signal.signal(signal.SIGTERM, self._handle_signal)
@@ -204,9 +211,16 @@ class Orchestrator:
         self.running = False
 
     def run(self):
-        info("Init camera...")
+        if self.camera:
+            info(f"Init camera ({self.camera.backend})...")
+        else:
+            info("Camera disabled.")
         info(f"Init AI client ({self.ai.model} on OpenRouter)...")
-        info("Init vision client (local Gemma)...")
+        if self.vision:
+            info(f"Init vision client ({self.vision.model} via {self.vision.provider})...")
+            if self.vision.provider == "aarg_mlx":
+                state = "ready" if self.vision.health_check() else "not ready"
+                info(f"[VISION] AARG service is {state} at {self.vision.base_url}")
         self._start_chat_server()
         self.status_publisher.start()
         if ENABLE_CAMERA:
@@ -593,14 +607,15 @@ class Orchestrator:
         if not self.vision:
             return {"status": "error", "message": "Vision model not available (ENABLE_CAMERA=0)"}
         info("[REOLINK] Capturing snapshot...")
-        try:
-            _, data_uri = self.reolink.capture()
-        except Exception as e:
-            return {"status": "error", "message": f"Reolink capture failed: {e}"}
-        try:
-            description = self.vision.describe(data_uri)
-        except Exception as e:
-            return {"status": "error", "message": f"Vision describe failed: {e}"}
+        with self.vision_job_lock:
+            try:
+                _, data_uri = self.reolink.capture()
+            except Exception as e:
+                return {"status": "error", "message": f"Reolink capture failed: {e}"}
+            try:
+                description = self.vision.describe(data_uri)
+            except Exception as e:
+                return {"status": "error", "message": f"Vision describe failed: {e}"}
         if not description:
             return {"status": "error", "message": "Vision model returned empty description"}
         captured_at = time.strftime("%-I:%M%p").lower().lstrip("0")
@@ -663,23 +678,25 @@ class Orchestrator:
 
     def _capture_and_describe(self) -> dict | None:
         """Capture a photo and get a text description from the local vision model."""
-        try:
-            jpeg_bytes, photo_uri = self.camera.capture()
-        except Exception as e:
-            info(f"[VISION] Camera error: {e}")
-            return None
+        with self.vision_job_lock:
+            try:
+                jpeg_bytes, photo_uri = self.camera.capture()
+                captured_at = time.time()
+            except Exception as e:
+                info(f"[VISION] Camera error: {e}")
+                return None
 
-        self._save_debug_image(jpeg_bytes)
+            self._save_debug_image(jpeg_bytes)
 
-        try:
-            description = self.vision.describe(photo_uri)
-        except Exception as e:
-            info(f"[VISION] Describe error: {e}")
-            return None
+            try:
+                description = self.vision.describe(photo_uri)
+            except Exception as e:
+                info(f"[VISION] Describe error: {e}")
+                return None
         if not description:
             info("[VISION] Got empty description from vision model, skipping")
             return None
-        scene = {"description": description, "timestamp": time.time()}
+        scene = {"description": description, "timestamp": captured_at}
         with self.scene_lock:
             self.latest_scene = scene
         return scene
@@ -771,27 +788,10 @@ class Orchestrator:
 
     def _do_vision_capture(self, notify_agent=False):
         """Full-res capture + vision model describe. Optionally interrupt the agent."""
-        try:
-            jpeg_bytes, photo_uri = self.camera.capture()
-        except Exception as e:
-            info(f"[VISION] Full capture error: {e}")
+        scene = self._capture_and_describe()
+        if not scene:
             return
-
-        self._save_debug_image(jpeg_bytes)
-
-        try:
-            description = self.vision.describe(photo_uri)
-        except Exception as e:
-            info(f"[VISION] Describe error: {e}")
-            return
-
-        if not description:
-            info("[VISION] Empty description, skipping")
-            return
-
-        scene = {"description": description, "timestamp": time.time()}
-        with self.scene_lock:
-            self.latest_scene = scene
+        description = scene["description"]
         info(f"[VISION] Scene updated: {description[:100]}...")
 
         if notify_agent:

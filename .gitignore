@@ -1,6 +1,8 @@
 __pycache__/
 *.pyc
 .env
+.session_token
+.claude/worktrees/
 venv/
 *.zsh
 debug_images/*

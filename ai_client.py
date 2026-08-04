@@ -1,7 +1,11 @@
 """LLM API clients — MiniMax M3 on OpenRouter (brain) + local Gemma (vision)."""
 
+import importlib
 import json
 import re
+import sys
+import threading
+import time
 import requests
 from logger import info
 from config import (
@@ -11,8 +15,13 @@ from config import (
     VISION_BASE_URL,
     VISION_MODEL,
     VISION_API_KEY,
+    VISION_AARG_MLX_DIR,
+    VISION_ENABLE_THINKING,
+    VISION_MAX_TOKENS,
     VISION_PROMPT_BASE,
+    VISION_PROVIDER,
     VISION_REQUESTS_FILE,
+    VISION_THINKING_BUDGET,
     VISION_TIMEOUT,
     LLM_MAX_TOKENS,
     LLM_MAX_TOKENS_COMPACT,
@@ -330,14 +339,39 @@ def _salvage_partial(text: str) -> list | None:
 
 
 class VisionClient:
-    """Local Gemma on llama.cpp — vision descriptions."""
+    """Local vision client with generic llama.cpp and AARG MLX modes."""
 
     def __init__(self):
         self.base_url = VISION_BASE_URL.rstrip("/")
         self.model = VISION_MODEL
+        self.provider = VISION_PROVIDER
+        self._inference_lock = threading.Lock()
+        self._aarg_scene = None
         self._headers = {}
         if VISION_API_KEY:
             self._headers["Authorization"] = f"Bearer {VISION_API_KEY}"
+        if self.provider == "aarg_mlx":
+            self._aarg_scene = self._load_aarg_scene()
+        elif self.provider != "generic":
+            raise ValueError("VISION_PROVIDER must be 'generic' or 'aarg_mlx'")
+
+    @staticmethod
+    def _load_aarg_scene():
+        """Load the canonical AARG prompt/schema client only in AARG mode."""
+        if VISION_AARG_MLX_DIR and VISION_AARG_MLX_DIR not in sys.path:
+            sys.path.insert(0, VISION_AARG_MLX_DIR)
+        try:
+            module = importlib.import_module("scene")
+        except ImportError as exc:
+            raise RuntimeError(
+                "VISION_PROVIDER=aarg_mlx requires scene.py from aarg_mlx; set "
+                "VISION_AARG_MLX_DIR or add that directory to PYTHONPATH"
+            ) from exc
+        required = ("build_perception_payload", "validate_perception")
+        if not all(hasattr(module, name) for name in required):
+            location = getattr(module, "__file__", "unknown location")
+            raise RuntimeError(f"Imported scene module at {location} is not the AARG client")
+        return module
 
     def _build_vision_prompt(self) -> str:
         """Build vision prompt from base + requests file."""
@@ -351,39 +385,164 @@ class VisionClient:
             pass
         return prompt
 
-    def describe(self, image_data_uri: str, max_retries: int = 3) -> str:
-        """Send a photo to local Gemma and get a text description. Retries on empty."""
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": self._build_vision_prompt()},
-                    {"type": "image_url", "image_url": {"url": image_data_uri}},
-                ],
-            }
-        ]
-        payload = {
+    def _build_generic_payload(self, image_data_uri: str) -> dict:
+        return {
             "model": self.model,
-            "messages": messages,
-            "max_tokens": 2048,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": self._build_vision_prompt()},
+                        {"type": "image_url", "image_url": {"url": image_data_uri}},
+                    ],
+                }
+            ],
+            "max_tokens": VISION_MAX_TOKENS,
             "temperature": 0.3,
         }
-        for attempt in range(max_retries):
-            resp = requests.post(
-                f"{self.base_url}/chat/completions",
-                headers=self._headers,
-                json=payload,
-                timeout=VISION_TIMEOUT,
+
+    def _build_aarg_payload(self, image_data_uri: str) -> dict:
+        """Use AARG's canonical image ordering, prompt, and strict schema."""
+        payload = self._aarg_scene.build_perception_payload(
+            model=self.model,
+            image_data_uri=image_data_uri,
+            max_tokens=VISION_MAX_TOKENS,
+        )
+
+        # Preserve AI Roommate's update_vision_requests tool while retaining the
+        # canonical AARG base prompt and schema.
+        extra_prompt = ""
+        try:
+            with open(VISION_REQUESTS_FILE, "r") as f:
+                extra_prompt = f.read().strip()
+        except FileNotFoundError:
+            pass
+        if extra_prompt:
+            content = payload["messages"][0]["content"]
+            for part in reversed(content):
+                if part.get("type") == "text":
+                    part["text"] += "\n\nAdditional observation request:\n" + extra_prompt
+                    break
+
+        if VISION_ENABLE_THINKING:
+            payload.update({
+                "enable_thinking": True,
+                "thinking_budget": VISION_THINKING_BUDGET,
+                "thinking_start_token": "<|think|>",
+                "thinking_end_token": "<channel|>",
+                # Reserve the normal structured answer budget after thinking.
+                "max_tokens": VISION_THINKING_BUDGET + VISION_MAX_TOKENS,
+            })
+        return payload
+
+    @staticmethod
+    def _message_text(data: dict) -> str:
+        try:
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise ValueError(f"Unexpected vision response: {data}") from exc
+        if isinstance(content, list):
+            content = "".join(
+                item.get("text", "")
+                for item in content
+                if isinstance(item, dict)
+                and item.get("type") in ("text", "output_text")
             )
-            resp.raise_for_status()
-            data = resp.json()
-            choice = data["choices"][0]
-            finish = choice.get("finish_reason", "unknown")
-            raw = choice["message"]["content"]
-            cleaned = _clean(raw)
-            if cleaned:
-                if finish == "length":
-                    info(f"[VISION] Description truncated (hit max_tokens). Length: {len(cleaned)} chars")
-                return cleaned
-            info(f"[VISION] Empty response (attempt {attempt + 1}/{max_retries}). Raw: {repr(raw[:200])}")
+        if not isinstance(content, str):
+            raise ValueError(f"Vision response content is not text: {content!r}")
+        return content.strip()
+
+    def _parse_aarg_perception(self, data: dict) -> dict:
+        """Parse the final structured result, tolerating exposed thought text."""
+        text = self._message_text(data)
+        if "<channel|>" in text:
+            text = text.rsplit("<channel|>", 1)[-1].strip()
+        if text.startswith("```"):
+            lines = text.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+
+        candidates = [text]
+        candidates.extend(text[index:] for index, char in enumerate(text) if char == "{")
+        decoder = json.JSONDecoder()
+        last_error = None
+        for candidate in candidates:
+            try:
+                perception, _ = decoder.raw_decode(candidate.lstrip())
+                if not isinstance(perception, dict):
+                    continue
+                self._aarg_scene.validate_perception(perception)
+                return perception
+            except (json.JSONDecodeError, ValueError, TypeError, RuntimeError) as exc:
+                last_error = exc
+        raise ValueError(f"AARG vision returned no valid perception: {text[:500]}") from last_error
+
+    def health_check(self) -> bool:
+        """Return whether the configured vision service is accepting requests."""
+        try:
+            response = requests.get(f"{self.base_url}/models", timeout=5)
+            return response.ok
+        except requests.RequestException:
+            return False
+
+    def describe(self, image_data_uri: str, max_retries: int = 3) -> str:
+        """Describe a frame, allowing only one active local inference request."""
+        payload = (
+            self._build_aarg_payload(image_data_uri)
+            if self.provider == "aarg_mlx"
+            else self._build_generic_payload(image_data_uri)
+        )
+        with self._inference_lock:
+            for attempt in range(max_retries):
+                started = time.perf_counter()
+                try:
+                    resp = requests.post(
+                        f"{self.base_url}/chat/completions",
+                        headers=self._headers,
+                        json=payload,
+                        timeout=VISION_TIMEOUT,
+                    )
+                    status = getattr(resp, "status_code", 200)
+                    if (
+                        self.provider == "aarg_mlx"
+                        and (status >= 500 or status == 429)
+                        and attempt + 1 < max_retries
+                    ):
+                        delay = 2 ** attempt
+                        info(f"[VISION] AARG HTTP {status}; retrying in {delay}s")
+                        time.sleep(delay)
+                        continue
+                    resp.raise_for_status()
+                except (requests.ConnectionError, requests.Timeout) as exc:
+                    if attempt + 1 >= max_retries:
+                        raise
+                    delay = 2 ** attempt
+                    info(f"[VISION] Transient request failure: {exc}; retrying in {delay}s")
+                    time.sleep(delay)
+                    continue
+
+                data = resp.json()
+                elapsed = time.perf_counter() - started
+                if self.provider == "aarg_mlx":
+                    perception = self._parse_aarg_perception(data)
+                    usage = data.get("usage") or {}
+                    timings = data.get("timings") or {}
+                    info(
+                        f"[VISION] AARG perception in {elapsed:.2f}s; "
+                        f"usage={usage}, timings={timings}, thinking={VISION_ENABLE_THINKING}"
+                    )
+                    return json.dumps(perception, ensure_ascii=False, separators=(",", ":"))
+
+                choice = data["choices"][0]
+                finish = choice.get("finish_reason", "unknown")
+                raw = self._message_text(data)
+                cleaned = _clean(raw)
+                if cleaned:
+                    if finish == "length":
+                        info(f"[VISION] Description truncated (hit max_tokens). Length: {len(cleaned)} chars")
+                    return cleaned
+                info(f"[VISION] Empty response (attempt {attempt + 1}/{max_retries}). Raw: {repr(raw[:200])}")
         return ""

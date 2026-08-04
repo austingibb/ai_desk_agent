@@ -1,4 +1,5 @@
 import os
+import sys
 import time as _time
 from dotenv import load_dotenv
 
@@ -7,6 +8,7 @@ load_dotenv(os.path.join(PROJECT_DIR, ".env"))
 
 # Network
 DISPLAY_SERVER_URL = os.environ.get("DISPLAY_SERVER_URL", "http://localhost:5050")
+ENABLE_WEB_SEARCH = os.environ.get("ENABLE_WEB_SEARCH", "1") == "1"
 
 # Brain LLM — MiniMax M3 on OpenRouter
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://openrouter.ai/api/v1")
@@ -16,10 +18,27 @@ LLM_MAX_TOKENS = 2048
 LLM_MAX_TOKENS_COMPACT = int(os.environ.get("LLM_MAX_TOKENS_COMPACT", "64000"))
 LLM_TIMEOUT = 120
 
-# Vision LLM — local Gemma on llama.cpp
-VISION_BASE_URL = os.environ.get("VISION_BASE_URL", "http://localhost:8080/v1")
-VISION_MODEL = os.environ.get("VISION_MODEL", "Qwen3.6-27B-UD-Q4_K_XL.gguf")
+# Vision LLM. ``generic`` preserves the existing llama.cpp/Pi request path;
+# ``aarg_mlx`` uses the structured Gemma 4 service on a Mac.
+VISION_PROVIDER = os.environ.get("VISION_PROVIDER", "generic").strip().lower()
+_AARG_VISION = VISION_PROVIDER == "aarg_mlx"
+VISION_BASE_URL = os.environ.get(
+    "VISION_BASE_URL",
+    "http://127.0.0.1:8090/v1" if _AARG_VISION else "http://localhost:8080/v1",
+)
+VISION_MODEL = os.environ.get(
+    "VISION_MODEL",
+    "mlx-community/gemma-4-12B-it-4bit" if _AARG_VISION else "Qwen3.6-27B-UD-Q4_K_XL.gguf",
+)
 VISION_API_KEY = os.environ.get("VISION_API_KEY", "")
+VISION_ENABLE_THINKING = os.environ.get("VISION_ENABLE_THINKING", "1") == "1"
+VISION_THINKING_BUDGET = int(os.environ.get("VISION_THINKING_BUDGET", "1024"))
+VISION_MAX_TOKENS = int(
+    os.environ.get("VISION_MAX_TOKENS", "350" if _AARG_VISION else "2048")
+)
+VISION_AARG_MLX_DIR = os.environ.get(
+    "VISION_AARG_MLX_DIR", "/Users/austingibbons/tools/aarg_mlx"
+)
 VISION_POLL_INTERVAL = int(os.environ.get("VISION_POLL_INTERVAL", "180"))  # 3 min
 MOTION_POLL_INTERVAL = float(os.environ.get("MOTION_POLL_INTERVAL", "2.0"))  # seconds between lores captures
 CHILL_TIMEOUT = int(os.environ.get("CHILL_TIMEOUT", "300"))  # 5 min no motion → chill mode
@@ -107,14 +126,21 @@ REOLINK_TIMEOUT = int(os.environ.get("REOLINK_TIMEOUT", "10"))
 ENABLE_REOLINK = os.environ.get("ENABLE_REOLINK", "1") == "1"
 
 # Camera — use full sensor FOV to avoid center-crop zoom on IMX708
-CAMERA_WIDTH = 2304
-CAMERA_HEIGHT = 1296
-JPEG_QUALITY = 50
+CAMERA_BACKEND = os.environ.get("CAMERA_BACKEND", "auto").strip().lower()
+CAMERA_DEVICE_INDEX = int(os.environ.get("CAMERA_DEVICE_INDEX", "0"))
+CAMERA_WIDTH = int(os.environ.get("CAMERA_WIDTH", "2304"))
+CAMERA_HEIGHT = int(os.environ.get("CAMERA_HEIGHT", "1296"))
+CAMERA_IMAGE_MAX_WIDTH = int(
+    os.environ.get("CAMERA_IMAGE_MAX_WIDTH", "1024" if _AARG_VISION else "640")
+)
+JPEG_QUALITY = int(os.environ.get("JPEG_QUALITY", "88" if _AARG_VISION else "50"))
 # Rotate the captured image to compensate for physical camera mounting.
 # Degrees counterclockwise (PIL convention). Device is rotated 90° CCW; the
 # raw frame comes out 90° CW, so rotate -90 (i.e. 90° CW) to bring the scene
 # back upright. Verified against a debug frame. Override with CAMERA_ROTATION.
-CAMERA_ROTATION = int(os.environ.get("CAMERA_ROTATION", "-90"))
+CAMERA_ROTATION = int(
+    os.environ.get("CAMERA_ROTATION", "0" if sys.platform == "darwin" else "-90")
+)
 ENABLE_CAMERA = os.environ.get("ENABLE_CAMERA", "1") == "1"
 
 # Scene change detection — skip vision model when nothing changed
@@ -189,25 +215,43 @@ def build_system_prompt() -> str:
             "- flash_camera_light: Control the white LED spotlight on the Reolink camera. Great for waking Austin up in the morning — blast it bright to get his attention. Can also do a quick flash as a signal. Takes optional brightness (0-100) and duration_seconds.",
         ]
 
-    search_ref = "Use these just like take_photo — to find things to talk about."
     toolkit = (
-        "take_photo, capture_photo, take_reolink_photo, and web search are tools in your toolkit — use them when they'd add to the conversation, not because you feel obligated. "
+        "take_photo, capture_photo, and take_reolink_photo are tools in your toolkit — use them when they'd add to the conversation, not because you feel obligated. "
         "take_photo is for quick routine checks (cached, instant). "
         "capture_photo is for moments when you really need to know what's happening RIGHT NOW — like verifying the user followed through on something. It takes up to 2 minutes, so use it sparingly. "
         "take_reolink_photo gets a second angle from the security camera — useful for corroboration or checking a blind spot. Also slow. "
         "flash_camera_light is your alarm — use it to wake Austin up in the morning, ideally as part of a scheduled notification. "
-        "Search is great for pulling in outside world tidbits. "
-        "But your own musings, jokes, and observations are just as valid. You don't need a photo or a search result to have something to say."
+        "Your own musings, jokes, and observations are just as valid. You don't need a photo to have something to say."
     )
 
     if not ENABLE_CAMERA:
         intro = f"You are a friendly, chatty buddy living on a Raspberry Pi with {display_intro} in someone's room."
         core_tools = core_tools[2:]  # remove take_photo and capture_photo
-        search_ref = "Use these to find things to talk about."
-        toolkit = (
-            "Web search is a tool in your toolkit — use it when it adds to the conversation, not because you feel obligated. "
-            "Search is great for pulling in outside world tidbits. "
-            "But your own musings, jokes, and observations are just as valid. You don't need a search result to have something to say."
+        toolkit = "Your own musings, jokes, and observations are always valid."
+
+    if ENABLE_WEB_SEARCH:
+        search_section = (
+            "You also have access to Brave Search tools (brave_web_search, brave_local_search, "
+            "brave_image_search, brave_video_search, brave_news_search, brave_summarizer). "
+            "Use them to look up news, facts, jokes, weather, or whatever sparks a thought."
+        )
+        toolkit += (
+            " Web search is also available when it adds to the conversation. "
+            "It is useful for outside-world facts, but you do not need a search result to have something to say."
+        )
+        sparse_activity_line = "Take a photo or search the web occasionally if you want, but keep it sparse."
+        online_tone_line = "- Joking, banter, and sharing interesting things you find online are all fine."
+        freshness_line = (
+            "- For anything time-sensitive (dates, prices, releases, current events, who holds what job), "
+            "run a web search instead of answering from memory. Do it on your own — Austin should never have to tell you to search."
+        )
+    else:
+        search_section = ""
+        sparse_activity_line = "Take a photo occasionally if you want, but keep it sparse."
+        online_tone_line = "- Joking, banter, and sharing interesting observations are all fine."
+        freshness_line = (
+            "- You cannot verify time-sensitive outside information in this mode. Be honest about that limitation "
+            "instead of guessing about dates, prices, releases, current events, or who holds a job."
         )
 
     # Display-vs-chat-only wording for the rest of the prompt.
@@ -249,7 +293,7 @@ Your real purpose is keeping Austin honest about the daily stuff — getting up 
 You have {len(all_core_tools)} core tools:
 {chr(10).join(all_core_tools)}
 
-You also have access to Brave Search tools (brave_web_search, brave_local_search, brave_image_search, brave_video_search, brave_news_search, brave_summarizer). {search_ref} Look up news, facts, jokes, weather, whatever sparks a thought.
+{search_section}
 
 You control everything. There are no timers. You decide what to do and when.
 
@@ -263,7 +307,7 @@ RHYTHM:
 2. Your text responses are internal — the user can ONLY see what you send via update_display or send_chat_message.
 3. After either one, call wait so the user can read it.
 4. If someone sends a chat message, respond via update_display or send_chat_message. Don't wait first.
-5. PACING: If you've sent 2 messages in a row with no user response between them, STOP. Switch to longer waits (5-30 minutes). The user isn't engaging right now — don't keep talking into the void. Take a photo or search the web occasionally if you want, but keep it sparse.
+5. PACING: If you've sent 2 messages in a row with no user response between them, STOP. Switch to longer waits (5-30 minutes). The user isn't engaging right now — don't keep talking into the void. {sparse_activity_line}
 {rhythm_reset_line}
 
 {toolkit}
@@ -272,7 +316,7 @@ You are in an autonomous agent loop. After a tool result comes back, you can eit
 
 TONE:
 - Casual, friendly, like a real buddy shooting the breeze.
-- Joking, banter, and sharing interesting things you find online are all fine.
+{online_tone_line}
 - Don't be afraid to be silly, make small talk, crack a joke, or ask random questions.
 - Notice the little things and comment on them naturally.
 - update_display messages: brief (~140 chars max), punchy, like a text from a friend.
@@ -286,7 +330,7 @@ DATES AND STALE KNOWLEDGE:
 - Your training data ended well before today. You do NOT know what year it is from memory. The CURRENT DATE AND TIME line sent with every turn is the truth — use it.
 - Message timestamps like [Wed 14:30:22] only show the weekday and clock. They are not evidence about the year.
 - If a camera feed, timestamp, file, or search result shows a date that feels wrong to you, it is not wrong — you are out of date. Never call hardware broken or "janky" to defend an assumption about the date.
-- For anything time-sensitive (dates, prices, releases, current events, who holds what job), run a web search instead of answering from memory. Do it on your own — Austin should never have to tell you to search.
+{freshness_line}
 - If you catch yourself about to say "it's still <year>", stop and read the date line above.
 
 CHAT INPUT:
@@ -333,9 +377,17 @@ You track Austin's pomodoro focus cycles (25 min work + 5 min break each).
         with open(USER_RULES_FILE, "r") as f:
             user_rules = f.read().strip()
         if user_rules:
-            return prompt + f"\n\n---\n\nUSER RULES (these override everything above — follow them exactly):\n{user_rules}"
+            prompt += f"\n\n---\n\nUSER RULES (these override everything above — follow them exactly):\n{user_rules}"
     except FileNotFoundError:
         pass
+
+    if not ENABLE_WEB_SEARCH:
+        prompt += (
+            "\n\n---\n\nRUNTIME CAPABILITY OVERRIDE:\n"
+            "Web search is disabled in this runtime and no search tools are available. "
+            "Do not attempt to search. Any stored instruction that says to run a search "
+            "cannot be followed until ENABLE_WEB_SEARCH is enabled again."
+        )
 
     return prompt
 

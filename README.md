@@ -21,14 +21,77 @@ python main.py
 
 Then open `http://localhost:8080`, log in with the chat password (`CHAT_PASSWORD`, default `admin`), and start talking. To approve a proposed notification, just reply affirmatively in chat ("yes", "sure", "go for it"); reply "no" / "stop" to reject.
 
-`ENABLE_DISPLAY`, `ENABLE_CAMERA`, and `ENABLE_TTS` toggle independently, so a laptop with a webcam and a reachable vision server can run camera-on, display-off with `ENABLE_CAMERA=1` (add `numpy` — see `requirements-chat.txt`). Set `ENABLE_REOLINK=0` unless you have the security camera on your network.
+`ENABLE_DISPLAY`, `ENABLE_CAMERA`, and `ENABLE_TTS` toggle independently, so a laptop with a webcam and a reachable vision server can run camera-on, display-off with `ENABLE_CAMERA=1` (use `requirements-mac.txt` on macOS). Set `ENABLE_REOLINK=0` unless you have the security camera on your network.
+
+## Mac mobile mode with AARG MLX vision
+
+The camera layer auto-selects `picamera2` on a Raspberry Pi and OpenCV/AVFoundation
+on macOS. Pi deployments retain the existing generic llama.cpp vision request;
+Mac mobile mode can opt into the structured Gemma 4 service in `aarg_mlx`.
+
+Start Gemma once and confirm its health:
+
+```bash
+cd /Users/austingibbons/tools/aarg_mlx
+bin/aarg-mlx stop
+bin/aarg-vision start
+curl --fail --silent http://127.0.0.1:8090/v1/models
+```
+
+Install and configure AI Roommate:
+
+```bash
+cd /Users/austingibbons/tools/ai_roommate
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements-mac.txt
+```
+
+Copy `.env.mac.example` to `.env`, then add your OpenRouter key and choose a
+chat password. Its relevant vision settings are:
+
+```dotenv
+LLM_API_KEY=sk-or-...
+ENABLE_DISPLAY=0
+ENABLE_CAMERA=1
+ENABLE_REOLINK=0
+ENABLE_TTS=0
+ENABLE_STATUS_PUBLISH=0
+ENABLE_WEB_SEARCH=0
+CAMERA_BACKEND=auto
+CAMERA_DEVICE_INDEX=0
+CAMERA_ROTATION=0
+VISION_PROVIDER=aarg_mlx
+VISION_BASE_URL=http://127.0.0.1:8090/v1
+VISION_MODEL=mlx-community/gemma-4-12B-it-4bit
+VISION_AARG_MLX_DIR=/Users/austingibbons/tools/aarg_mlx
+VISION_ENABLE_THINKING=1
+VISION_THINKING_BUDGET=1024
+VISION_MAX_TOKENS=350
+```
+
+Then run:
+
+```bash
+python main.py
+```
+
+macOS will ask for camera permission the first time. Grant access to the terminal
+or application that launches Python. If the wrong webcam is selected, change
+`CAMERA_DEVICE_INDEX`. Copy an existing `context.json` into this directory while
+the agent is stopped to resume its conversation history.
+
+In AARG mode, each perception request uses the canonical image-first prompt and
+strict scene schema. Thinking is enabled explicitly with Gemma 4's required
+`<|think|>` / `<channel|>` delimiters. A shared lock permits only one active
+vision inference even if an on-demand capture overlaps the background loop.
 
 ## How it works
 
 The system uses a **two-model architecture** split across three devices:
 
 - **MiniMax M3 on OpenRouter** is the brain. It handles reasoning, tool calling, conversation, decisions, and images/GIFs posted through web chat.
-- **Gemma 4 31B running locally on llama.cpp** handles vision. A background thread captures photos every ~3 minutes, sends them to Gemma for a text description, and caches the result. When the brain wants to "see" the room, it gets this cached description instantly.
+- A **local vision model** handles room perception. The Pi path supports its existing OpenAI-compatible llama.cpp server; Mac mobile mode supports Gemma 4 12B through AARG MLX. A background thread captures photos when motion warrants it and caches the resulting description.
 - **Piper TTS** (optional) gives it a voice. The AI's display messages are spoken aloud through a Bluetooth speaker via a local Piper HTTP server.
 
 The local room-camera path stays separate so continuous monitoring does not upload
@@ -83,7 +146,13 @@ All configuration is via environment variables or a `.env` file. Key settings:
 |----------|---------|-------------|
 | `LLM_API_KEY` | _(required)_ | OpenRouter API key |
 | `LLM_MODEL` | `minimax/minimax-m3` | Multimodal brain model on OpenRouter |
-| `VISION_BASE_URL` | `http://localhost:8081/v1` | llama.cpp server URL |
+| `VISION_PROVIDER` | `generic` | `generic` for the existing Pi request or `aarg_mlx` for structured Gemma vision |
+| `VISION_BASE_URL` | provider-specific | Vision server URL (`http://127.0.0.1:8090/v1` in AARG mode) |
+| `VISION_ENABLE_THINKING` | `1` | Enable Gemma thinking in AARG perception requests |
+| `VISION_THINKING_BUDGET` | `1024` | Thinking-token budget for AARG perception |
+| `ENABLE_WEB_SEARCH` | `1` | Initialize Brave Search MCP tools; set `0` to run without the MCP server |
+| `CAMERA_BACKEND` | `auto` | Auto-select `picamera2` on Pi or OpenCV on macOS |
+| `CAMERA_DEVICE_INDEX` | `0` | OpenCV webcam index |
 | `ENABLE_DISPLAY` | `1` | Disable the e-ink display + GPIO buttons with `0` (chat-only mode) |
 | `ENABLE_CAMERA` | `1` | Disable camera/vision with `0` |
 | `ENABLE_TTS` | `0` | Enable Piper TTS with `1` |

@@ -1,0 +1,3 @@
+-r requirements-chat.txt
+numpy
+opencv-python
