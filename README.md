@@ -134,9 +134,56 @@ The camera is an IMX708 capturing at full 2304x1296 sensor FOV, downscaled to 64
 
 ## Context and memory
 
-Conversation history persists to disk across restarts. The system auto-compacts at 150 messages, summarizing older messages while keeping the last 30 intact. The AI also has access to Brave Search via MCP for pulling in news, weather, facts, or anything else that sparks a thought.
+Conversation history persists to disk across restarts. The system auto-compacts at 150 messages, summarizing older messages while keeping the last 30 intact. When enabled, Brave Search is available through MCP for pulling in news, weather, and facts.
 
 Motion detection adjusts the vision loop — when the room is still for 5 minutes, it enters a chill mode and stops burning compute on unchanged scenes.
+
+## Local vision audit trail
+
+Vision requests have their own local Git repository:
+
+```text
+requests_for_image_model/
+├── .git/
+└── requests_for_image_model.md
+```
+
+This nested repository is independent from the project repository. It contains
+only the requests file, has its own commits and hashes, and has no remote. The
+parent repository ignores the entire directory, so its prompt history is never
+included in normal commits or pushes.
+
+On first startup, an existing root-level `requests_for_image_model.md` is copied
+into the nested repository, committed, and then removed from the old location.
+Calls to `update_vision_requests` create a new nested commit and return its full
+hash. Manual edits are committed automatically before the next vision request,
+ensuring the hash and prompt used for inference match.
+
+Inspect or restore the local history with ordinary Git commands:
+
+```bash
+git -C requests_for_image_model log --oneline
+git -C requests_for_image_model show <commit>:requests_for_image_model.md
+git -C requests_for_image_model checkout <commit> -- requests_for_image_model.md
+git -C requests_for_image_model status
+```
+
+Successful vision descriptions are written separately to:
+
+```text
+vision_logs/descriptions.jsonl
+```
+
+Watch new descriptions as they arrive:
+
+```bash
+tail -f vision_logs/descriptions.jsonl
+```
+
+Each JSONL entry contains only the description and vision audit metadata:
+capture/completion times, camera source, provider, model, latency, usage/timings,
+and the exact nested request commit hash. No image bytes are written to this log.
+The entire `vision_logs/` directory is ignored by the project repository.
 
 ## Configuration
 
@@ -150,6 +197,8 @@ All configuration is via environment variables or a `.env` file. Key settings:
 | `VISION_BASE_URL` | provider-specific | Vision server URL (`http://127.0.0.1:8090/v1` in AARG mode) |
 | `VISION_ENABLE_THINKING` | `1` | Enable Gemma thinking in AARG perception requests |
 | `VISION_THINKING_BUDGET` | `1024` | Thinking-token budget for AARG perception |
+| `VISION_REQUESTS_REPO_DIR` | `requests_for_image_model` | Local nested Git repository for the image-model requests file |
+| `VISION_DESCRIPTION_LOG_FILE` | `vision_logs/descriptions.jsonl` | Local JSONL log containing successful vision descriptions |
 | `ENABLE_WEB_SEARCH` | `1` | Initialize Brave Search MCP tools; set `0` to run without the MCP server |
 | `CAMERA_BACKEND` | `auto` | Auto-select `picamera2` on Pi or OpenCV on macOS |
 | `CAMERA_DEVICE_INDEX` | `0` | OpenCV webcam index |

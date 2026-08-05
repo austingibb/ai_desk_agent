@@ -3,7 +3,7 @@ import json
 import sys
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 from PIL import Image
@@ -81,6 +81,9 @@ class VisionClientTests(unittest.TestCase):
             "usage": {"completion_tokens": 25},
             "timings": {"predicted_per_second": 20.0},
         })
+        request_history = Mock()
+        request_history.snapshot.return_value = ("canonical requests", "b" * 40)
+        description_log = Mock()
 
         with (
             patch.object(ai_client, "VISION_PROVIDER", "aarg_mlx"),
@@ -91,8 +94,12 @@ class VisionClientTests(unittest.TestCase):
             patch.object(ai_client.importlib, "import_module", return_value=fake_scene),
             patch.object(ai_client.requests, "post", return_value=response) as post,
         ):
-            client = ai_client.VisionClient()
-            result = client.describe("data:image/jpeg;base64,AA==")
+            client = ai_client.VisionClient(request_history, description_log)
+            result = client.describe(
+                "data:image/jpeg;base64,AA==",
+                source="main_camera_background",
+                captured_at=1_785_800_000.0,
+            )
 
         payload = post.call_args.kwargs["json"]
         self.assertEqual(payload["messages"][0]["content"][0]["type"], "image_url")
@@ -102,6 +109,11 @@ class VisionClientTests(unittest.TestCase):
         self.assertEqual(payload["thinking_end_token"], "<channel|>")
         self.assertEqual(payload["max_tokens"], 606)
         self.assertEqual(json.loads(result), VALID_PERCEPTION)
+        self.assertEqual(client.last_request_commit, "b" * 40)
+        description_log.append.assert_called_once()
+        logged = description_log.append.call_args.kwargs
+        self.assertEqual(logged["request_commit"], "b" * 40)
+        self.assertEqual(logged["source"], "main_camera_background")
 
     def test_aarg_parser_accepts_exposed_thought_prefix(self):
         fake_scene = _fake_scene_module()

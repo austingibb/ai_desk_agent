@@ -47,7 +47,16 @@ VISION_PROMPT_BASE = (
     "Focus on: who/what is in the room, what they're doing, lighting, "
     "and anything notable or changed."
 )
-VISION_REQUESTS_FILE = os.path.join(PROJECT_DIR, "requests_for_image_model.md")
+VISION_REQUESTS_REPO_DIR = os.environ.get(
+    "VISION_REQUESTS_REPO_DIR",
+    os.path.join(PROJECT_DIR, "requests_for_image_model"),
+)
+VISION_REQUESTS_FILE = os.path.join(VISION_REQUESTS_REPO_DIR, "requests_for_image_model.md")
+VISION_REQUESTS_LEGACY_FILE = os.path.join(PROJECT_DIR, "requests_for_image_model.md")
+VISION_DESCRIPTION_LOG_FILE = os.environ.get(
+    "VISION_DESCRIPTION_LOG_FILE",
+    os.path.join(PROJECT_DIR, "vision_logs", "descriptions.jsonl"),
+)
 USER_RULES_FILE = os.path.join(PROJECT_DIR, "user_data", "rules.md")
 VISION_TIMEOUT = 120
 

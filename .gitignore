@@ -6,6 +6,8 @@ __pycache__/
 venv/
 *.zsh
 debug_images/*
+requests_for_image_model/
+vision_logs/
 context.json
 notifications.json
 user_data/

@@ -43,7 +43,6 @@ from config import (
     VISION_POLL_INTERVAL,
     MOTION_POLL_INTERVAL,
     CHILL_TIMEOUT,
-    VISION_REQUESTS_FILE,
     SCENE_RMS_THRESHOLD,
     SCENE_PCT_THRESHOLD,
     SCENE_MAX_STALE_SECONDS,
@@ -63,6 +62,7 @@ from presence import ActiveTracker
 from status_publisher import StatusPublisher
 from context import Context
 from ai_client import AIClient, LLMError, VisionClient
+from vision_history import VisionDescriptionLog, VisionRequestHistory
 from chat_media import ChatMediaError, build_chat_message, media_data_from_message
 from reolink import ReoLinkCamera
 from mcp_client import MCPClient
@@ -110,6 +110,17 @@ def _visible_response_text(response: dict) -> str:
 class Orchestrator:
     def __init__(self):
         self.ctx = Context()
+        if ENABLE_CAMERA:
+            self.vision_request_history = VisionRequestHistory()
+            self.vision_description_log = VisionDescriptionLog()
+            info(
+                "[VISION] Request history ready at "
+                f"{self.vision_request_history.repo_dir} "
+                f"(commit {self.vision_request_history.current_commit()})"
+            )
+        else:
+            self.vision_request_history = None
+            self.vision_description_log = None
         # Import camera dependencies lazily so camera-off chat mode stays light.
         # Camera itself selects picamera2 on Pi and OpenCV on macOS.
         if ENABLE_CAMERA:
@@ -118,7 +129,11 @@ class Orchestrator:
         else:
             self.camera = None
         self.ai = AIClient()
-        self.vision = VisionClient() if ENABLE_CAMERA else None
+        self.vision = (
+            VisionClient(self.vision_request_history, self.vision_description_log)
+            if ENABLE_CAMERA
+            else None
+        )
         self.reolink = ReoLinkCamera(REOLINK_IP, REOLINK_USER, REOLINK_PASSWORD, REOLINK_TIMEOUT) if ENABLE_REOLINK else None
         self.running = True
         self.last_display_time = 0
@@ -150,7 +165,7 @@ class Orchestrator:
         self._last_llm_fail = 0.0
 
         # Vision background thread state
-        self.latest_scene = None  # {"description": str, "timestamp": float}
+        self.latest_scene = None  # description, timestamp, and vision request commit
         self.scene_lock = threading.Lock()
         # Acquire before capture so a request waiting behind another inference
         # takes a fresh frame instead of eventually submitting a stale one.
@@ -549,12 +564,13 @@ class Orchestrator:
             "description": scene["description"],
             "captured_at": captured_at,
             "age_seconds": age,
+            "vision_request_commit": scene.get("request_commit", ""),
         }
 
     def _tool_capture_photo(self) -> dict:
         """Take a photo now and block until the vision model describes it."""
         info("[PHOTO] Synchronous capture + describe (blocking, may take up to 120s)...")
-        scene = self._capture_and_describe()
+        scene = self._capture_and_describe(source="main_camera_on_demand")
         if not scene:
             return {"status": "error", "message": "Failed to capture or describe photo — vision model may be unavailable"}
         captured_at = time.strftime("%-I:%M%p", time.localtime(scene["timestamp"])).lower().lstrip("0")
@@ -562,6 +578,7 @@ class Orchestrator:
             "status": "ok",
             "description": scene["description"],
             "captured_at": captured_at,
+            "vision_request_commit": scene.get("request_commit", ""),
         }
 
     def _tool_update_vision_requests(self, args: dict) -> dict:
@@ -569,13 +586,11 @@ class Orchestrator:
         if not requests_text:
             return {"status": "error", "message": "No requests text provided"}
 
-        # Read current contents so the AI can see what's already there
-        current = ""
-        try:
-            with open(VISION_REQUESTS_FILE, "r") as f:
-                current = f.read().strip()
-        except FileNotFoundError:
-            pass
+        if not self.vision_request_history:
+            return {"status": "error", "message": "Vision request history is unavailable"}
+
+        # Read current contents so the AI can see what's already there.
+        current = self.vision_request_history.read().strip()
 
         # First call with existing content: bounce back so the AI can merge
         if current and not self.vision_requests_shown:
@@ -593,11 +608,14 @@ class Orchestrator:
             }
 
         try:
-            with open(VISION_REQUESTS_FILE, "w") as f:
-                f.write(f"# Requests for Image Model\n\n{requests_text}\n")
+            commit_hash = self.vision_request_history.update(requests_text)
             self.vision_requests_shown = False  # reset so next update bounces again
-            info(f"[VISION] Requests updated: {requests_text[:100]}...")
-            return {"status": "ok", "message": "Vision requests updated. Changes take effect on the next photo capture."}
+            info(f"[VISION] Requests updated at {commit_hash}: {requests_text[:100]}...")
+            return {
+                "status": "ok",
+                "message": "Vision requests updated and committed. Changes take effect on the next photo capture.",
+                "commit_hash": commit_hash,
+            }
         except Exception as e:
             return {"status": "error", "message": f"Failed to write requests file: {e}"}
 
@@ -610,10 +628,15 @@ class Orchestrator:
         with self.vision_job_lock:
             try:
                 _, data_uri = self.reolink.capture()
+                captured_at_epoch = time.time()
             except Exception as e:
                 return {"status": "error", "message": f"Reolink capture failed: {e}"}
             try:
-                description = self.vision.describe(data_uri)
+                description = self.vision.describe(
+                    data_uri,
+                    source="reolink_security_cam",
+                    captured_at=captured_at_epoch,
+                )
             except Exception as e:
                 return {"status": "error", "message": f"Vision describe failed: {e}"}
         if not description:
@@ -625,6 +648,7 @@ class Orchestrator:
             "description": description,
             "captured_at": captured_at,
             "source": "reolink_security_cam",
+            "vision_request_commit": self.vision.last_request_commit,
         }
 
     def _tool_flash_ir_light(self, args: dict) -> dict:
@@ -676,7 +700,7 @@ class Orchestrator:
             return {"status": "ok", "message": f"Light on at {brightness}% — will turn off in {duration}s"}
         return {"status": "ok", "message": f"Light {'on' if on else 'off'} at {brightness}% brightness"}
 
-    def _capture_and_describe(self) -> dict | None:
+    def _capture_and_describe(self, source: str = "main_camera") -> dict | None:
         """Capture a photo and get a text description from the local vision model."""
         with self.vision_job_lock:
             try:
@@ -689,14 +713,22 @@ class Orchestrator:
             self._save_debug_image(jpeg_bytes)
 
             try:
-                description = self.vision.describe(photo_uri)
+                description = self.vision.describe(
+                    photo_uri,
+                    source=source,
+                    captured_at=captured_at,
+                )
             except Exception as e:
                 info(f"[VISION] Describe error: {e}")
                 return None
         if not description:
             info("[VISION] Got empty description from vision model, skipping")
             return None
-        scene = {"description": description, "timestamp": captured_at}
+        scene = {
+            "description": description,
+            "timestamp": captured_at,
+            "request_commit": self.vision.last_request_commit,
+        }
         with self.scene_lock:
             self.latest_scene = scene
         return scene
@@ -788,7 +820,7 @@ class Orchestrator:
 
     def _do_vision_capture(self, notify_agent=False):
         """Full-res capture + vision model describe. Optionally interrupt the agent."""
-        scene = self._capture_and_describe()
+        scene = self._capture_and_describe(source="main_camera_background")
         if not scene:
             return
         description = scene["description"]

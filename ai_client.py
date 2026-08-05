@@ -8,6 +8,7 @@ import threading
 import time
 import requests
 from logger import info
+from vision_history import VisionDescriptionLog, VisionRequestHistory
 from config import (
     LLM_BASE_URL,
     LLM_API_KEY,
@@ -341,10 +342,17 @@ def _salvage_partial(text: str) -> list | None:
 class VisionClient:
     """Local vision client with generic llama.cpp and AARG MLX modes."""
 
-    def __init__(self):
+    def __init__(
+        self,
+        request_history: VisionRequestHistory | None = None,
+        description_log: VisionDescriptionLog | None = None,
+    ):
         self.base_url = VISION_BASE_URL.rstrip("/")
         self.model = VISION_MODEL
         self.provider = VISION_PROVIDER
+        self.request_history = request_history
+        self.description_log = description_log
+        self.last_request_commit = ""
         self._inference_lock = threading.Lock()
         self._aarg_scene = None
         self._headers = {}
@@ -373,26 +381,30 @@ class VisionClient:
             raise RuntimeError(f"Imported scene module at {location} is not the AARG client")
         return module
 
-    def _build_vision_prompt(self) -> str:
+    def _build_vision_prompt(self, requests_content: str | None = None) -> str:
         """Build vision prompt from base + requests file."""
         prompt = VISION_PROMPT_BASE
-        try:
-            with open(VISION_REQUESTS_FILE, "r") as f:
-                extra = f.read().strip()
-            if extra:
-                prompt += "\n\n" + extra
-        except FileNotFoundError:
-            pass
+        if requests_content is None:
+            try:
+                with open(VISION_REQUESTS_FILE, "r") as f:
+                    requests_content = f.read()
+            except FileNotFoundError:
+                requests_content = ""
+        extra = requests_content.strip()
+        if extra:
+            prompt += "\n\n" + extra
         return prompt
 
-    def _build_generic_payload(self, image_data_uri: str) -> dict:
+    def _build_generic_payload(
+        self, image_data_uri: str, requests_content: str | None = None
+    ) -> dict:
         return {
             "model": self.model,
             "messages": [
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": self._build_vision_prompt()},
+                        {"type": "text", "text": self._build_vision_prompt(requests_content)},
                         {"type": "image_url", "image_url": {"url": image_data_uri}},
                     ],
                 }
@@ -401,7 +413,9 @@ class VisionClient:
             "temperature": 0.3,
         }
 
-    def _build_aarg_payload(self, image_data_uri: str) -> dict:
+    def _build_aarg_payload(
+        self, image_data_uri: str, requests_content: str | None = None
+    ) -> dict:
         """Use AARG's canonical image ordering, prompt, and strict schema."""
         payload = self._aarg_scene.build_perception_payload(
             model=self.model,
@@ -411,12 +425,13 @@ class VisionClient:
 
         # Preserve AI Roommate's update_vision_requests tool while retaining the
         # canonical AARG base prompt and schema.
-        extra_prompt = ""
-        try:
-            with open(VISION_REQUESTS_FILE, "r") as f:
-                extra_prompt = f.read().strip()
-        except FileNotFoundError:
-            pass
+        if requests_content is None:
+            try:
+                with open(VISION_REQUESTS_FILE, "r") as f:
+                    requests_content = f.read()
+            except FileNotFoundError:
+                requests_content = ""
+        extra_prompt = requests_content.strip()
         if extra_prompt:
             content = payload["messages"][0]["content"]
             for part in reversed(content):
@@ -488,12 +503,52 @@ class VisionClient:
         except requests.RequestException:
             return False
 
-    def describe(self, image_data_uri: str, max_retries: int = 3) -> str:
+    def _record_description(
+        self,
+        description: str,
+        *,
+        request_commit: str,
+        source: str,
+        captured_at: float | None,
+        latency_s: float,
+        usage=None,
+        timings=None,
+    ):
+        self.last_request_commit = request_commit
+        if not self.description_log:
+            return
+        try:
+            self.description_log.append(
+                description=description,
+                request_commit=request_commit,
+                model=self.model,
+                provider=self.provider,
+                source=source,
+                captured_at=captured_at,
+                latency_s=latency_s,
+                usage=usage,
+                timings=timings,
+            )
+        except Exception as exc:
+            info(f"[VISION] Description log error: {exc}")
+
+    def describe(
+        self,
+        image_data_uri: str,
+        max_retries: int = 3,
+        *,
+        source: str = "camera",
+        captured_at: float | None = None,
+    ) -> str:
         """Describe a frame, allowing only one active local inference request."""
+        requests_content = None
+        request_commit = ""
+        if self.request_history:
+            requests_content, request_commit = self.request_history.snapshot()
         payload = (
-            self._build_aarg_payload(image_data_uri)
+            self._build_aarg_payload(image_data_uri, requests_content)
             if self.provider == "aarg_mlx"
-            else self._build_generic_payload(image_data_uri)
+            else self._build_generic_payload(image_data_uri, requests_content)
         )
         with self._inference_lock:
             for attempt in range(max_retries):
@@ -534,7 +589,19 @@ class VisionClient:
                         f"[VISION] AARG perception in {elapsed:.2f}s; "
                         f"usage={usage}, timings={timings}, thinking={VISION_ENABLE_THINKING}"
                     )
-                    return json.dumps(perception, ensure_ascii=False, separators=(",", ":"))
+                    description = json.dumps(
+                        perception, ensure_ascii=False, separators=(",", ":")
+                    )
+                    self._record_description(
+                        description,
+                        request_commit=request_commit,
+                        source=source,
+                        captured_at=captured_at,
+                        latency_s=elapsed,
+                        usage=usage,
+                        timings=timings,
+                    )
+                    return description
 
                 choice = data["choices"][0]
                 finish = choice.get("finish_reason", "unknown")
@@ -543,6 +610,15 @@ class VisionClient:
                 if cleaned:
                     if finish == "length":
                         info(f"[VISION] Description truncated (hit max_tokens). Length: {len(cleaned)} chars")
+                    self._record_description(
+                        cleaned,
+                        request_commit=request_commit,
+                        source=source,
+                        captured_at=captured_at,
+                        latency_s=elapsed,
+                        usage=data.get("usage"),
+                        timings=data.get("timings"),
+                    )
                     return cleaned
                 info(f"[VISION] Empty response (attempt {attempt + 1}/{max_retries}). Raw: {repr(raw[:200])}")
         return ""
