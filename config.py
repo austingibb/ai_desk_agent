@@ -113,6 +113,13 @@ CHAT_MAX_REQUEST_BYTES = int(
 
 # Notifications
 REVIEW_INTERVAL = int(os.environ.get("REVIEW_INTERVAL", "1800"))  # 30 minutes
+NOTIFICATION_APPROVAL_MODE = os.environ.get(
+    "NOTIFICATION_APPROVAL_MODE", "smart"
+).strip().lower()
+if NOTIFICATION_APPROVAL_MODE not in {"legacy", "smart"}:
+    raise ValueError(
+        "NOTIFICATION_APPROVAL_MODE must be either 'legacy' or 'smart'"
+    )
 
 # E-ink display (SSD1680Z, 122x250)
 # ENABLE_DISPLAY=0 runs chat-only: no e-ink, no Pi Zero display server, no GPIO
@@ -215,6 +222,11 @@ def build_system_prompt() -> str:
         "- pomodoro_stats: Cycles today, cycles this week, current streak, best streak, average per day.",
         "- enter_pomodoro_mode / exit_pomodoro_mode: Turn the e-ink into a focus screen (count + estimated end time; button press = +1 cycle), or return it to chat.",
     ]
+    if NOTIFICATION_APPROVAL_MODE == "smart":
+        core_tools.insert(
+            6,
+            "- resolve_notification_proposal: Interpret the user's natural-language response to a pending notification proposal and approve or reject it.",
+        )
 
     reolink_tools = []
     if ENABLE_REOLINK:
@@ -278,8 +290,14 @@ def build_system_prompt() -> str:
             "\n\nBUTTON NUDGES:\n"
             "- If a button was pressed during your wait, the user wants to hear from you. Respond with a new thought, observation, or topic — don't just acknowledge the button, say something interesting."
         )
-        notif_decision_line = '- The user approves by pressing a button. They reject via chat ("no", "stop", etc).'
-        notif_persistence_line = '- PERSISTENCE: After you show a notification, it is NOT done until the user acknowledges it with a button press or a chat response. Keep appending the notification message to your next 3 messages (e.g. add a line like "!! <notification message>" at the end). If the user presses a button or sends a chat message before 3 messages, consider it acknowledged and stop. If they don\'t respond after 3 messages, let it go.'
+        if NOTIFICATION_APPROVAL_MODE == "smart":
+            notif_decision_line = (
+                "- SMART APPROVAL: A physical button press explicitly approves. For chat replies, use your judgment and conversation context to decide whether the user intends to approve or reject the pending proposal, then call resolve_notification_proposal. Do not resolve it from an unrelated or ambiguous reply; ask naturally or leave it pending. Never approve your own proposal before the user responds."
+            )
+            notif_persistence_line = '- PERSISTENCE: After you show a notification proposal, it remains pending until the user presses the button or you resolve their clear chat response. An unrelated or ambiguous reply does not resolve it. You may append the proposal to your next 3 messages; if intent remains unclear after that, let the conversation move on but leave the proposal pending.'
+        else:
+            notif_decision_line = '- LEGACY APPROVAL: The user approves by pressing a button. Fixed chat keywords reject the proposal.'
+            notif_persistence_line = '- PERSISTENCE: After you show a notification, it is NOT done until the user acknowledges it with a button press or a chat response. Keep appending the notification message to your next 3 messages (e.g. add a line like "!! <notification message>" at the end). If the user presses a button or sends a chat message before 3 messages, consider it acknowledged and stop. If they don\'t respond after 3 messages, let it go.'
         pomodoro_button_line = "- While in pomodoro mode, each button press logs +1 completed cycle automatically and refreshes the screen. You'll be told when a cycle is logged so you can cheer him on briefly."
     else:
         rhythm_short_line = "   - update_display = SHORT. A quip, a one-liner, a brief comment. Keep it brief."
@@ -290,8 +308,14 @@ def build_system_prompt() -> str:
             "- NEVER mention these formatting constraints in conversation. Just follow them silently."
         )
         button_nudges_section = ""
-        notif_decision_line = '- The user approves or rejects via chat: an affirmative reply ("yes", "sure", "go for it") approves it; "no", "stop", or "cancel" rejects it.'
-        notif_persistence_line = '- PERSISTENCE: After you show a notification, it is NOT done until the user acknowledges it with a chat response. Keep appending the notification message to your next 3 messages (e.g. add a line like "!! <notification message>" at the end). If the user replies in chat before 3 messages, consider it acknowledged and stop. If they don\'t respond after 3 messages, let it go.'
+        if NOTIFICATION_APPROVAL_MODE == "smart":
+            notif_decision_line = (
+                "- SMART APPROVAL: Use your judgment and conversation context to decide whether the user's natural-language reply intends to approve or reject the pending proposal, then call resolve_notification_proposal. Handle nuance, corrections, and indirect phrasing. Do not resolve it from an unrelated or ambiguous reply; ask naturally or leave it pending. Never approve your own proposal before the user responds."
+            )
+            notif_persistence_line = '- PERSISTENCE: After you show a notification proposal, it remains pending until you resolve the user\'s clear response. An unrelated or ambiguous reply does not resolve it. You may append the proposal to your next 3 messages; if intent remains unclear after that, let the conversation move on but leave the proposal pending.'
+        else:
+            notif_decision_line = '- LEGACY APPROVAL: Fixed chat keywords approve or reject the pending proposal.'
+            notif_persistence_line = '- PERSISTENCE: After you show a notification, it is NOT done until the user acknowledges it with a chat response. Keep appending the notification message to your next 3 messages (e.g. add a line like "!! <notification message>" at the end). If the user replies in chat before 3 messages, consider it acknowledged and stop. If they don\'t respond after 3 messages, let it go.'
         pomodoro_button_line = "- There is no physical button in this mode, so log cycles when Austin tells you he finished one (\"done\", \"+1\", \"finished a pomodoro\"). enter/exit_pomodoro_mode still track the session even without the e-ink screen."
 
     all_core_tools = core_tools + reolink_tools
@@ -486,7 +510,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "propose_notification",
-            "description": "Propose a recurring notification for the user. They will see it on the display and can approve (button press) or reject (via chat).",
+            "description": "Create a pending recurring-notification proposal for the user to review. A proposal is not active until the user approves it.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -505,6 +529,28 @@ TOOL_DEFINITIONS = [
                     },
                 },
                 "required": ["message", "trigger_type", "trigger_value"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "resolve_notification_proposal",
+            "description": "Resolve the current pending notification proposal after interpreting the user's latest natural-language response. Call only when their intent to approve or reject is clear; leave ambiguous or unrelated replies pending.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "decision": {
+                        "type": "string",
+                        "enum": ["approve", "reject"],
+                        "description": "The user's intended decision about the pending proposal.",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Brief explanation of the wording or context that made the user's intent clear.",
+                    },
+                },
+                "required": ["decision", "reason"],
             },
         },
     },
@@ -804,6 +850,7 @@ TOOL_DEFINITIONS = [
 
 CAMERA_TOOL_NAMES = {"take_photo", "capture_photo", "update_vision_requests"}
 REOLINK_TOOL_NAMES = {"take_reolink_photo", "flash_camera_light", "flash_ir_light"}
+SMART_NOTIFICATION_TOOL_NAMES = {"resolve_notification_proposal"}
 
 def get_tool_definitions() -> list:
     result = list(TOOL_DEFINITIONS)
@@ -811,4 +858,9 @@ def get_tool_definitions() -> list:
         result = [t for t in result if t["function"]["name"] not in CAMERA_TOOL_NAMES]
     if not ENABLE_REOLINK:
         result = [t for t in result if t["function"]["name"] not in REOLINK_TOOL_NAMES]
+    if NOTIFICATION_APPROVAL_MODE != "smart":
+        result = [
+            t for t in result
+            if t["function"]["name"] not in SMART_NOTIFICATION_TOOL_NAMES
+        ]
     return result

@@ -34,6 +34,7 @@ from config import (
     CHAT_MAX_MEDIA_BYTES,
     CHAT_MAX_REQUEST_BYTES,
     REVIEW_INTERVAL,
+    NOTIFICATION_APPROVAL_MODE,
     build_policy_reminder,
     estimate_tool_tokens,
     LLM_ESTIMATED_MAX_TOKENS,
@@ -146,6 +147,9 @@ class Orchestrator:
         self.mcp_tools = []
         self.mcp = None
         self.notification_store = NotificationStore()
+        # Used by smart notification approval to ensure the agent can only
+        # resolve a proposal after a real chat response sent after its creation.
+        self.last_chat_message_time = 0.0
         self.drink_store = DrinkStore()
         self.pomodoro_store = PomodoroStore()
         # Pomodoro mode: e-ink shows a focus screen (count + block end) and a
@@ -307,7 +311,7 @@ class Orchestrator:
                 self.ctx._repair_pairing()
                 messages = self.ctx.get_messages()
                 msg_tokens = self.ctx.total_tokens()
-            reminder = build_policy_reminder()
+            reminder = self._build_turn_reminder()
             messages.append({"role": "user", "content": reminder})
             estimated = msg_tokens + estimate_tool_tokens(tools) + len(reminder) // 4
             if estimated > LLM_ESTIMATED_MAX_TOKENS:
@@ -324,7 +328,7 @@ class Orchestrator:
                 with self.ctx_lock:
                     messages = self.ctx.get_messages()
                     msg_tokens = self.ctx.total_tokens()
-                reminder = build_policy_reminder()
+                reminder = self._build_turn_reminder()
                 messages.append({"role": "user", "content": reminder})
                 estimated = msg_tokens + estimate_tool_tokens(tools) + len(reminder) // 4
                 info(f"[LLM] After compaction: ~{msg_tokens} msg tokens + {estimate_tool_tokens(tools)} tool tokens = ~{estimated} total")
@@ -533,6 +537,8 @@ class Orchestrator:
         elif name == "propose_notification":
             play_sound("update_display")
             return self._tool_propose_notification(args)
+        elif name == "resolve_notification_proposal":
+            return self._tool_resolve_notification_proposal(args)
         elif name == "schedule_notification":
             return self._tool_schedule_notification(args)
         elif name == "delete_notification":
@@ -1230,10 +1236,90 @@ class Orchestrator:
             message, trigger_type, trigger_value
         )
         info(f"[NOTIF] Proposal created: {notif['id']} — \"{message}\"")
+        if ENABLE_DISPLAY:
+            response_instructions = (
+                f"Show this proposal to the user: '{message}'. Tell them they can "
+                "press the physical button or reply in chat."
+            )
+        else:
+            response_instructions = (
+                f"Show this proposal to the user: '{message}'. Ask them to reply "
+                "naturally with what they want."
+            )
+        if NOTIFICATION_APPROVAL_MODE == "smart":
+            response_instructions += (
+                " When they reply in chat, interpret their intent and call "
+                "resolve_notification_proposal only if it is clear."
+            )
+        elif not ENABLE_DISPLAY:
+            response_instructions += " The legacy harness recognizes standard yes/no replies."
         return {
             "status": "ok",
-            "message": f"Proposal saved. Now show it to the user with update_display: '{message} — press button to approve!'",
+            "notification_id": notif["id"],
+            "message": f"Proposal saved. {response_instructions}",
         }
+
+    def _tool_resolve_notification_proposal(self, args: dict) -> dict:
+        if NOTIFICATION_APPROVAL_MODE != "smart":
+            return {
+                "status": "error",
+                "message": "Notification decisions are handled by the legacy harness in this mode.",
+            }
+
+        decision = args.get("decision", "")
+        reason = args.get("reason", "")
+        if decision not in {"approve", "reject"}:
+            return {"status": "error", "message": "Decision must be approve or reject."}
+        if not isinstance(reason, str) or not reason.strip():
+            return {"status": "error", "message": "A brief decision reason is required."}
+        reason = reason.strip()
+
+        pending = self.notification_store.get_pending_proposal()
+        if not pending:
+            return {"status": "error", "message": "There is no pending notification proposal."}
+        if self.last_chat_message_time <= pending.get("proposed_at", 0):
+            return {
+                "status": "error",
+                "message": "Wait for a new user chat response before resolving this proposal.",
+            }
+
+        if decision == "approve":
+            resolved = self.notification_store.approve_pending()
+        else:
+            resolved = self.notification_store.reject_pending()
+        if not resolved:
+            return {"status": "error", "message": "The pending proposal could not be resolved."}
+
+        past_tense = "approved" if decision == "approve" else "rejected"
+        info(
+            f"[NOTIF] Proposal {past_tense} by smart approval: {resolved['id']} "
+            f"(reason: {reason})"
+        )
+        return {
+            "status": "ok",
+            "decision": decision,
+            "notification_id": resolved["id"],
+            "message": f"Notification proposal {past_tense}.",
+        }
+
+    def _build_turn_reminder(self) -> str:
+        reminder = build_policy_reminder()
+        if NOTIFICATION_APPROVAL_MODE != "smart":
+            return reminder
+
+        pending = self.notification_store.get_pending_proposal()
+        if not pending:
+            return reminder
+        return (
+            f"{reminder}\n\n"
+            "PENDING NOTIFICATION PROPOSAL:\n"
+            f"- id: {pending['id']}\n"
+            f"- message: {pending['message']}\n"
+            f"- schedule: {pending['trigger_type']} {pending['trigger_value']}\n"
+            "Interpret only a genuine user response sent after this proposal. If it clearly "
+            "approves or rejects the proposal, call resolve_notification_proposal. If it is "
+            "ambiguous or unrelated, leave the proposal pending."
+        )
 
     def _tool_schedule_notification(self, args: dict) -> dict:
         notif_id = args.get("notification_id", "")
@@ -2027,17 +2113,19 @@ class ChatHandler(BaseHTTPRequestHandler):
 
         orch = ChatHandler.orchestrator
 
-        REJECTION_KEYWORDS = ["no", "nah", "don't", "stop", "cancel", "never", "quit", "not that"]
-        AFFIRMATION_KEYWORDS = ["yes", "yeah", "yep", "yup", "sure", "ok", "okay", "sounds good", "go for it", "do it", "approve"]
-
         approval_notice = None
-        if orch.notification_store.has_pending_proposal():
+        if (
+            NOTIFICATION_APPROVAL_MODE == "legacy"
+            and orch.notification_store.has_pending_proposal()
+        ):
+            rejection_keywords = ["no", "nah", "don't", "stop", "cancel", "never", "quit", "not that"]
+            affirmation_keywords = ["yes", "yeah", "yep", "yup", "sure", "ok", "okay", "sounds good", "go for it", "do it", "approve"]
             msg_lower = message.lower()
-            if any(kw in msg_lower for kw in REJECTION_KEYWORDS):
+            if any(kw in msg_lower for kw in rejection_keywords):
                 rejected = orch.notification_store.reject_pending()
                 if rejected:
                     info(f"[NOTIF] Proposal rejected via chat: {rejected['id']}")
-            elif not ENABLE_DISPLAY and any(kw in msg_lower for kw in AFFIRMATION_KEYWORDS):
+            elif not ENABLE_DISPLAY and any(kw in msg_lower for kw in affirmation_keywords):
                 # No buttons in chat-only mode — an affirmative chat reply approves.
                 approved = orch.notification_store.approve_pending()
                 if approved:
@@ -2054,6 +2142,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 })
             else:
                 orch.chat_queue.append(content)
+        orch.last_chat_message_time = time.time()
         orch.chat_event.set()
         orch.presence.touch()
         media_log = f", {len(chat_images)} attachment(s)" if chat_images else ""

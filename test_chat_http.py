@@ -6,6 +6,7 @@ import threading
 import types
 import unittest
 from http.server import HTTPServer
+from unittest.mock import patch
 
 
 # ChatHandler itself is stdlib-only, but main.py also defines hardware/network
@@ -42,6 +43,36 @@ from main import ChatHandler
 class _Notifications:
     def has_pending_proposal(self):
         return False
+
+
+class _PendingNotifications:
+    def __init__(self):
+        self.pending = {
+            "id": "notif_test",
+            "message": "Stretch every hour",
+            "status": "proposed",
+        }
+        self.approvals = 0
+        self.rejections = 0
+
+    def has_pending_proposal(self):
+        return self.pending is not None
+
+    def approve_pending(self):
+        if not self.pending:
+            return None
+        self.approvals += 1
+        resolved = self.pending
+        self.pending = None
+        return resolved
+
+    def reject_pending(self):
+        if not self.pending:
+            return None
+        self.rejections += 1
+        resolved = self.pending
+        self.pending = None
+        return resolved
 
 
 class _Presence:
@@ -126,6 +157,45 @@ class ChatHTTPTests(unittest.TestCase):
         html = response.read().decode()
         self.assertIn("replace(/\\n/g,'<br>')", html)
         self.assertNotIn("replace(/\n/g,'<br>')", html)
+
+    def test_smart_approval_leaves_natural_language_decision_for_agent(self):
+        notifications = _PendingNotifications()
+        self.orch.notification_store = notifications
+
+        with patch("main.NOTIFICATION_APPROVAL_MODE", "smart"):
+            response = self._request(
+                "POST",
+                "/chat",
+                {"message": "That sounds useful while I'm studying."},
+            )
+            self.assertEqual(response.status, 200)
+            response.read()
+
+        self.assertEqual(notifications.approvals, 0)
+        self.assertEqual(notifications.rejections, 0)
+        self.assertEqual(self.orch.chat_queue, ["That sounds useful while I'm studying."])
+        self.assertGreater(self.orch.last_chat_message_time, 0)
+
+    def test_legacy_approval_keeps_keyword_matcher(self):
+        notifications = _PendingNotifications()
+        self.orch.notification_store = notifications
+
+        with (
+            patch("main.NOTIFICATION_APPROVAL_MODE", "legacy"),
+            patch("main.ENABLE_DISPLAY", False),
+        ):
+            response = self._request(
+                "POST",
+                "/chat",
+                {"message": "Sure, go for it."},
+            )
+            self.assertEqual(response.status, 200)
+            response.read()
+
+        self.assertEqual(notifications.approvals, 1)
+        self.assertEqual(notifications.rejections, 0)
+        self.assertIn("The user approved your notification", self.orch.chat_queue[0])
+        self.assertEqual(self.orch.chat_queue[1], "Sure, go for it.")
 
 
 if __name__ == "__main__":

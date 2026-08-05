@@ -137,6 +137,12 @@ class NotificationStore:
     def has_pending_proposal(self):
         return any(n["status"] == "proposed" for n in self.notifications)
 
+    def get_pending_proposal(self):
+        for notification in self.notifications:
+            if notification["status"] == "proposed":
+                return notification
+        return None
+
     def get_review_summary(self, patterns=None):
         now = _time.strftime("%-I:%M%p").lower().lstrip("0")
         day = _time.strftime("%a")
