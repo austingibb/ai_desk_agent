@@ -36,9 +36,9 @@ VISION_THINKING_BUDGET = int(os.environ.get("VISION_THINKING_BUDGET", "1024"))
 VISION_MAX_TOKENS = int(
     os.environ.get("VISION_MAX_TOKENS", "350" if _AARG_VISION else "2048")
 )
-VISION_AARG_MLX_DIR = os.environ.get(
-    "VISION_AARG_MLX_DIR", "/Users/austingibbons/tools/aarg_mlx"
-)
+# Directory holding the aarg_mlx ``scene.py`` client. Empty means "already on
+# PYTHONPATH"; only consulted when VISION_PROVIDER=aarg_mlx.
+VISION_AARG_MLX_DIR = os.environ.get("VISION_AARG_MLX_DIR", "")
 VISION_POLL_INTERVAL = int(os.environ.get("VISION_POLL_INTERVAL", "180"))  # 3 min
 MOTION_POLL_INTERVAL = float(os.environ.get("MOTION_POLL_INTERVAL", "2.0"))  # seconds between lores captures
 CHILL_TIMEOUT = int(os.environ.get("CHILL_TIMEOUT", "300"))  # 5 min no motion → chill mode

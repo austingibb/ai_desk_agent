@@ -1,148 +1,130 @@
 # AI Roommate
 
-An autonomous AI agent that lives on a Raspberry Pi in your room. It watches what's going on through a camera, talks to you through an e-ink display and web chat, and speaks out loud via text-to-speech. It's not a voice assistant you summon — it runs on its own, observing the room and deciding when to chime in.
+An autonomous AI agent that lives in your room. It watches what's going on through a camera, talks to you through a web chat and an e-ink display, and can speak out loud via text-to-speech. You don't summon it. It runs on its own loop, observing the room and deciding when to chime in.
 
-The real point: keeping you honest about the small daily stuff. Getting up from the desk, drinking water, staying on track with studying instead of drifting. It's the friend who actually remembers what you said you'd do and holds you to it.
+The real point is keeping you honest about the small daily stuff. Getting up from the desk, drinking water, staying on track instead of drifting. It tracks caffeine and pomodoros, and it remembers what you said you'd do.
 
-## Run it on your laptop (chat-only)
+## Quick start (chat-only)
 
-No Raspberry Pis, no e-ink screen, no wiring. In **chat-only mode** the agent runs on a single ordinary machine and uses the web chat as its only interface. The full agent loop, tools, compaction, and notifications all work the same — the only difference is that messages the AI would put on the e-ink display go to the chat instead, and notification approvals happen in chat (there are no buttons to press).
+No Raspberry Pis, no e-ink screen, no wiring. In **chat-only mode** the agent runs on one ordinary machine with the web chat as its only interface. The agent loop, tools, compaction, and notifications all work the same. Messages that would go to the e-ink display go to chat instead, and you approve notifications in chat rather than with physical buttons.
 
 ```bash
 git clone <this-repo> ai_roommate && cd ai_roommate
 pip install -r requirements-chat.txt
 
 export LLM_API_KEY=sk-or-...   # your OpenRouter key
-export ENABLE_DISPLAY=0        # no e-ink / buttons — route everything to chat
-export NOTIFICATION_APPROVAL_MODE=smart  # let the agent interpret approval intent
+export ENABLE_DISPLAY=0        # no e-ink / buttons, route everything to chat
 export ENABLE_CAMERA=0         # no webcam / vision server
+export ENABLE_REOLINK=0        # no network security camera
 
 python main.py
 ```
 
-Then open `http://localhost:8080`, log in with the chat password (`CHAT_PASSWORD`, default `admin`), and start talking. With smart approval, respond naturally to a notification proposal. The agent interprets whether you approved or rejected it, and leaves ambiguous or unrelated replies pending.
+Open `http://localhost:8080` and log in with `CHAT_PASSWORD` (default `admin`). In the default `smart` approval mode you can answer a notification proposal in plain language. The agent decides whether you approved it, and leaves ambiguous replies pending.
 
-`ENABLE_DISPLAY`, `ENABLE_CAMERA`, and `ENABLE_TTS` toggle independently, so a laptop with a webcam and a reachable vision server can run camera-on, display-off with `ENABLE_CAMERA=1` (use `requirements-mac.txt` on macOS). Set `ENABLE_REOLINK=0` unless you have the security camera on your network.
+`ENABLE_DISPLAY`, `ENABLE_CAMERA`, and `ENABLE_TTS` toggle independently, so a laptop with a webcam can run camera-on, display-off. Settings can live in a `.env` file instead of the environment. `.env.mac.example` is a working starting point for macOS.
 
-## Mac mobile mode with AARG MLX vision
+## Local vision (optional)
 
-The camera layer auto-selects `picamera2` on a Raspberry Pi and OpenCV/AVFoundation
-on macOS. Pi deployments retain the existing generic llama.cpp vision request;
-Mac mobile mode can opt into the structured Gemma 4 service in `aarg_mlx`.
+Room perception always runs against a local vision model, so watching the room continuously never uploads camera frames to a hosted API. The camera layer picks `picamera2` on a Raspberry Pi and OpenCV/AVFoundation on macOS (`pip install -r requirements-mac.txt`). macOS asks for camera permission on the first capture; grant it to whatever terminal or app launches Python. If the wrong webcam is picked, change `CAMERA_DEVICE_INDEX`.
 
-Start Gemma once and confirm its health:
+There are two providers.
 
-```bash
-cd /Users/austingibbons/tools/aarg_mlx
-bin/aarg-mlx stop
-bin/aarg-vision start
-curl --fail --silent http://127.0.0.1:8090/v1/models
-```
+### `generic`: any OpenAI-compatible vision server
 
-Install and configure AI Roommate:
-
-```bash
-cd /Users/austingibbons/tools/ai_roommate
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements-mac.txt
-```
-
-Copy `.env.mac.example` to `.env`, then add your OpenRouter key and choose a
-chat password. Its relevant vision settings are:
+The default. Point `VISION_BASE_URL` at a llama.cpp, mlx-vlm, or similar server and set `VISION_MODEL` to whatever it serves. The agent sends a free-text prompt (the base prompt plus your `requests_for_image_model.md`) and stores the reply as the room description.
 
 ```dotenv
-LLM_API_KEY=sk-or-...
-ENABLE_DISPLAY=0
-NOTIFICATION_APPROVAL_MODE=smart
 ENABLE_CAMERA=1
-ENABLE_REOLINK=0
-ENABLE_TTS=0
-ENABLE_STATUS_PUBLISH=0
-ENABLE_WEB_SEARCH=0
-CAMERA_BACKEND=auto
-CAMERA_DEVICE_INDEX=0
-CAMERA_ROTATION=0
+VISION_PROVIDER=generic
+VISION_BASE_URL=http://<your-vision-host>:8080/v1
+VISION_MODEL=<model-id-your-server-reports>
+```
+
+### `aarg_mlx`: structured Gemma 4 on Apple silicon
+
+This mode replaces the free-text prompt with a fixed image-first prompt and a strict JSON schema, so every frame comes back in the same shape (people present, activity, lighting, notable details) instead of prose. It expects a local [mlx-vlm](https://github.com/Blaizzy/mlx-vlm) server on `127.0.0.1:8090`.
+
+Setting up your own MLX server:
+
+```bash
+python3 -m venv ~/.venvs/mlx-vlm
+~/.venvs/mlx-vlm/bin/pip install mlx-vlm
+~/.venvs/mlx-vlm/bin/pip install huggingface_hub[cli]
+~/.venvs/mlx-vlm/bin/hf download mlx-community/gemma-4-12B-it-4bit
+
+~/.venvs/mlx-vlm/bin/python -m mlx_vlm.server \
+  --model mlx-community/gemma-4-12B-it-4bit \
+  --host 127.0.0.1 --port 8090 \
+  --vision-cache-size 1 \
+  --thinking-start-token '<|think|>' \
+  --thinking-end-token '<channel|>' \
+  --max-tokens 1600
+```
+
+Confirm it's up with `curl --fail --silent http://127.0.0.1:8090/v1/models`.
+
+Notes on those flags and numbers:
+
+- The weights are about 6.3 GB. A cold request takes roughly 8.5 s and peaks near 7.7 GB of MLX memory, so run vision off your capture and UI threads.
+- `<|think|>` and `<channel|>` are Gemma 4's actual reasoning delimiters. mlx-vlm's generic `<think>`/`</think>` defaults don't enforce a thinking budget for this model.
+- `--vision-cache-size 1` because unique camera frames get nothing out of caching 20 vision embeddings.
+- The server binds to loopback and has no authentication, so don't expose the port.
+- Don't keep another large local model resident at the same time on a 32 GB machine.
+
+To point the agent at it: this provider imports `scene.py` (the canonical prompt, JSON schema, and validator) from a companion `aarg_mlx` checkout. Set `VISION_AARG_MLX_DIR` to that directory or put it on `PYTHONPATH`. Startup fails with a clear error if the module isn't found. Without it, use `VISION_PROVIDER=generic` against the same server.
+
+```dotenv
+ENABLE_CAMERA=1
 VISION_PROVIDER=aarg_mlx
 VISION_BASE_URL=http://127.0.0.1:8090/v1
 VISION_MODEL=mlx-community/gemma-4-12B-it-4bit
-VISION_AARG_MLX_DIR=/Users/austingibbons/tools/aarg_mlx
+VISION_AARG_MLX_DIR=/path/to/aarg_mlx
 VISION_ENABLE_THINKING=1
 VISION_THINKING_BUDGET=1024
 VISION_MAX_TOKENS=350
 ```
 
-Then run:
-
-```bash
-python main.py
-```
-
-macOS will ask for camera permission the first time. Grant access to the terminal
-or application that launches Python. If the wrong webcam is selected, change
-`CAMERA_DEVICE_INDEX`. Copy an existing `context.json` into this directory while
-the agent is stopped to resume its conversation history.
-
-In AARG mode, each perception request uses the canonical image-first prompt and
-strict scene schema. Thinking is enabled explicitly with Gemma 4's required
-`<|think|>` / `<channel|>` delimiters. A shared lock permits only one active
-vision inference even if an on-demand capture overlaps the background loop.
+A shared lock allows only one vision inference at a time, so an on-demand capture can't overlap the background loop.
 
 ## How it works
 
-The system uses a **two-model architecture** split across three devices:
+Two models split the work. A hosted brain (MiniMax M3 on OpenRouter by default) does the reasoning, tool calling, conversation, decisions, and any images or GIFs you post in chat. A local vision model handles room perception: a background thread captures frames when motion warrants it and caches the description, so the brain's `take_photo` tool returns instantly.
 
-- **MiniMax M3 on OpenRouter** is the brain. It handles reasoning, tool calling, conversation, decisions, and images/GIFs posted through web chat.
-- A **local vision model** handles room perception. The Pi path supports its existing OpenAI-compatible llama.cpp server; Mac mobile mode supports Gemma 4 12B through AARG MLX. A background thread captures photos when motion warrants it and caches the resulting description.
-- **Piper TTS** (optional) gives it a voice. The AI's display messages are spoken aloud through a Bluetooth speaker via a local Piper HTTP server.
+Images you post in chat go straight to the brain as multimodal content. Raw uploads stay only in the newest 30 messages and are never written to `context.json`. After that they're replaced by the post text plus the model's description of them.
 
-The local room-camera path stays separate so continuous monitoring does not upload
-camera frames to OpenRouter. User-posted PNG, JPEG, WebP, and GIF files go directly
-to MiniMax M3 as multimodal message content. Raw uploads remain only in the latest
-30 conversation messages and are never written to `context.json`; after that they
-are replaced with the post text and MiniMax's contemporaneous description before
-normal context compaction.
+The brain runs an autonomous loop with no timers or hardcoded behaviors:
 
-The brain runs in an autonomous agent loop — there are no timers or hardcoded behaviors. The AI decides what to do and when:
-
-1. Send conversation history + tools to MiniMax M3
-2. MiniMax M3 picks an action: check the room, update the display, send a chat message, search the web, wait, or manage notifications
+1. Send conversation history + tool definitions to the brain
+2. It picks an action: check the room, update the display, send a chat message, search the web, log a drink or pomodoro, wait, or manage notifications
 3. Execute the tool calls, feed results back
 4. Repeat
 
-When nothing is happening, it idles. When the user interacts (chat message or button press), it wakes up and responds. It manages its own pacing — backing off when ignored, engaging more when in conversation.
+When nothing is happening it idles. A chat message or button press wakes it. It paces itself, backing off when ignored and engaging more during conversation.
 
-## Hardware
+## Full build (hardware)
 
 | Device | Role |
 |--------|------|
-| **Pi 5** (or faster) | Orchestrator — runs the agent loop, camera, TTS, web chat server |
-| **Pi Zero 2W** | Display server — drives the e-ink screen (SSD1680Z, 122x250) and two GPIO buttons |
-| **GPU machine** | Runs llama.cpp serving Gemma 4 31B for vision |
+| **Pi 5** (or faster) | Orchestrator. Agent loop, camera, TTS, web chat server |
+| **Pi Zero 2W** | Display server. E-ink screen (SSD1680Z, 122x250) and two GPIO buttons |
+| **Vision machine** | Local OpenAI-compatible vision server (llama.cpp or mlx-vlm) |
 
-The camera is an IMX708 capturing at full 2304x1296 sensor FOV, downscaled to 640px for the vision model. The e-ink display is small — about 140 characters max — which forces the AI to be concise. Longer thoughts go to the web chat instead.
+The camera is an IMX708 capturing the full 2304x1296 sensor FOV, downscaled before it reaches the vision model. The display holds about 140 characters, which forces the AI to be concise. Longer thoughts go to chat.
 
-## Interaction
+Interaction surfaces:
 
-**E-ink display** — The AI's primary output. Short, punchy messages like texts from a friend. Updated whenever the AI has something to say.
+- **E-ink display.** Short, punchy messages, like texts from a friend.
+- **Web chat.** Password-protected UI on port 8080. Longer messages, and you can type, paste, select, or drag in PNG, JPEG, WebP, and animated GIF files. Optional HTTPS via mkcert.
+- **Physical buttons.** Nudge the AI into saying something, or approve a proposed notification.
+- **Voice.** With `ENABLE_TTS=1`, display messages are spoken through a local Piper server. Non-blocking, and new speech interrupts old.
+- **Notifications.** The AI proposes recurring reminders like stretch breaks or "it's getting late". In `smart` mode it interprets natural chat replies; in `legacy` mode only a physical button resolves a proposal. A scoring system tracks what you actually engage with.
 
-**Web chat** — A password-protected web UI on port 8080. The AI sends longer messages here — real thoughts, stories, detailed replies. The user can type, paste, select, or drag in PNG, JPEG, WebP, and animated GIF files. Optional HTTPS via mkcert.
+Conversation history persists across restarts and auto-compacts at 150 messages, summarizing older ones while keeping the last 30 intact. Brave Search is available through MCP when `ENABLE_WEB_SEARCH=1`. When the room is still for 5 minutes the vision loop enters chill mode and stops burning compute on unchanged scenes.
 
-**Physical buttons** — Two GPIO buttons on the display Pi. Press one to nudge the AI into saying something new, or to approve a proposed notification.
+## Vision audit trail
 
-**Voice** — When TTS is enabled, display messages are spoken aloud through Piper. Non-blocking with interrupt support (new speech cuts off old speech).
-
-**Notifications** — The AI can propose recurring reminders (stretch breaks, "it's getting late"). In the default `smart` approval mode, the agent interprets natural chat responses and explicitly resolves the proposal; physical button presses still approve when the display hardware is enabled. In `legacy` mode, only the physical button resolves a proposal. A scoring system tracks what the user engages with.
-
-## Context and memory
-
-Conversation history persists to disk across restarts. The system auto-compacts at 150 messages, summarizing older messages while keeping the last 30 intact. When enabled, Brave Search is available through MCP for pulling in news, weather, and facts.
-
-Motion detection adjusts the vision loop — when the room is still for 5 minutes, it enters a chill mode and stops burning compute on unchanged scenes.
-
-## Local vision audit trail
-
-Vision requests have their own local Git repository:
+The prompt sent to the vision model lives in its own nested Git repository, separate from this project and with no remote:
 
 ```text
 requests_for_image_model/
@@ -150,97 +132,59 @@ requests_for_image_model/
 └── requests_for_image_model.md
 ```
 
-This nested repository is independent from the project repository. It contains
-only the requests file, has its own commits and hashes, and has no remote. The
-parent repository ignores the entire directory, so its prompt history is never
-included in normal commits or pushes.
-
-On first startup, an existing root-level `requests_for_image_model.md` is copied
-into the nested repository, committed, and then removed from the old location.
-Calls to `update_vision_requests` create a new nested commit and return its full
-hash. Manual edits are committed automatically before the next vision request,
-ensuring the hash and prompt used for inference match.
-
-Inspect or restore the local history with ordinary Git commands:
+The parent repository ignores the whole directory, so prompt history never lands in normal commits. `update_vision_requests` creates a nested commit and returns its hash. Manual edits are committed automatically before the next vision request, so the recorded hash always matches the prompt actually used.
 
 ```bash
 git -C requests_for_image_model log --oneline
 git -C requests_for_image_model show <commit>:requests_for_image_model.md
-git -C requests_for_image_model checkout <commit> -- requests_for_image_model.md
-git -C requests_for_image_model status
 ```
 
-Successful vision descriptions are written separately to:
-
-```text
-vision_logs/descriptions.jsonl
-```
-
-Watch new descriptions as they arrive:
+Successful descriptions are appended to `vision_logs/descriptions.jsonl`, which is also git-ignored. Each entry has the description plus capture and completion times, camera source, provider, model, latency, usage/timings, and the request commit hash. No image bytes.
 
 ```bash
 tail -f vision_logs/descriptions.jsonl
 ```
 
-Each JSONL entry contains only the description and vision audit metadata:
-capture/completion times, camera source, provider, model, latency, usage/timings,
-and the exact nested request commit hash. No image bytes are written to this log.
-The entire `vision_logs/` directory is ignored by the project repository.
-
 ## Configuration
 
-All configuration is via environment variables or a `.env` file. Key settings:
+Everything is set with environment variables or a `.env` file.
 
 | Variable | Default | What it does |
 |----------|---------|-------------|
 | `LLM_API_KEY` | _(required)_ | OpenRouter API key |
-| `LLM_MODEL` | `minimax/minimax-m3` | Multimodal brain model on OpenRouter |
-| `VISION_PROVIDER` | `generic` | `generic` for the existing Pi request or `aarg_mlx` for structured Gemma vision |
-| `VISION_BASE_URL` | provider-specific | Vision server URL (`http://127.0.0.1:8090/v1` in AARG mode) |
-| `VISION_ENABLE_THINKING` | `1` | Enable Gemma thinking in AARG perception requests |
-| `VISION_THINKING_BUDGET` | `1024` | Thinking-token budget for AARG perception |
-| `VISION_REQUESTS_REPO_DIR` | `requests_for_image_model` | Local nested Git repository for the image-model requests file |
-| `VISION_DESCRIPTION_LOG_FILE` | `vision_logs/descriptions.jsonl` | Local JSONL log containing successful vision descriptions |
-| `ENABLE_WEB_SEARCH` | `1` | Initialize Brave Search MCP tools; set `0` to run without the MCP server |
-| `CAMERA_BACKEND` | `auto` | Auto-select `picamera2` on Pi or OpenCV on macOS |
+| `LLM_MODEL` | `minimax/minimax-m3` | Multimodal brain model |
+| `VISION_PROVIDER` | `generic` | `generic` free-text request, or `aarg_mlx` structured Gemma vision |
+| `VISION_BASE_URL` | provider-specific | Vision server URL |
+| `VISION_MODEL` | provider-specific | Vision model id |
+| `VISION_AARG_MLX_DIR` | _(unset)_ | Directory containing `scene.py`, required by `aarg_mlx` |
+| `VISION_ENABLE_THINKING` | `1` | Enable thinking in `aarg_mlx` perception requests |
+| `VISION_THINKING_BUDGET` | `1024` | Thinking-token budget |
+| `VISION_POLL_INTERVAL` | `180` | Seconds between background captures |
+| `ENABLE_DISPLAY` | `1` | `0` = chat-only mode (no e-ink, no GPIO) |
+| `ENABLE_CAMERA` | `1` | `0` disables the camera and all vision tools |
+| `ENABLE_REOLINK` | `1` | `0` disables the network security-camera tools |
+| `ENABLE_TTS` | `0` | `1` enables Piper TTS |
+| `ENABLE_WEB_SEARCH` | `1` | `0` runs without the Brave Search MCP server |
+| `ENABLE_STATUS_PUBLISH` | `1` | Publish `{active, drinks}` to S3, needs `STATUS_S3_BUCKET` |
+| `NOTIFICATION_APPROVAL_MODE` | `smart` | `smart` interprets chat replies, `legacy` is button-only |
+| `CAMERA_BACKEND` | `auto` | `picamera2` on Pi, OpenCV on macOS |
 | `CAMERA_DEVICE_INDEX` | `0` | OpenCV webcam index |
-| `ENABLE_DISPLAY` | `1` | Disable the e-ink display + GPIO buttons with `0` (chat-only mode) |
-| `NOTIFICATION_APPROVAL_MODE` | `smart` | `smart` lets the agent interpret chat approval/rejection; `legacy` is physical-button-only |
-| `ENABLE_CAMERA` | `1` | Disable camera/vision with `0` |
-| `ENABLE_TTS` | `0` | Enable Piper TTS with `1` |
 | `CHAT_PASSWORD` | `admin` | Web chat login password |
-| `CHAT_USE_HTTPS` | `0` | Enable HTTPS with `1` |
-| `CHAT_MAX_IMAGES_PER_MESSAGE` | `4` | Maximum image/GIF attachments in one chat message |
-| `CHAT_MAX_MEDIA_BYTES` | `20971520` | Maximum decoded attachment bytes per message (20 MB total) |
-| `CHAT_TAKEOVER_SECONDS` | `15` | Duration of transient chat notices |
-| `CHAT_SSE_MAX_STREAMS` | `8` | Maximum concurrent chat event streams |
-| `CHAT_SSE_HEARTBEAT_SECONDS` | `15` | Seconds between event-stream heartbeat comments |
-| `CHAT_SSE_IDLE_SECONDS` | `300` | Close an event stream after this many seconds without a state or transcript change |
-| `VISION_POLL_INTERVAL` | `180` | Seconds between background photo captures |
+| `CHAT_USE_HTTPS` | `0` | `1` enables HTTPS (`SSL_CERT_FILE` / `SSL_KEY_FILE`) |
+| `CHAT_MAX_IMAGES_PER_MESSAGE` | `4` | Attachment count limit per message |
+| `CHAT_MAX_MEDIA_BYTES` | `20971520` | Decoded attachment bytes per message (20 MB) |
 | `COMPACT_AFTER_N_MESSAGES` | `150` | Message count before compaction triggers |
-
-## Contributor note: adding tools
-
-Any commit that adds an agent tool must add its plain-English mode-indicator label
-to `TOOL_LABELS` in `main.py` in the same commit. Unmapped tools deliberately show
-their exact raw name in the UI so missing labels remain visible.
 
 ## Deployment
 
-Both Pis run systemd services. The orchestrator is `ai-eink` on the Pi 5, and the display server is `display-server` on the Pi Zero 2W. Piper TTS runs as a separate `piper-tts` service.
-
-Deploy by pushing to the repo, then pulling and restarting on each Pi:
+Both Pis run systemd services: `ai-eink` on the Pi 5, `display-server` on the Pi Zero 2W, and `piper-tts` separately if TTS is enabled. Push to the repo, then pull and restart on each:
 
 ```bash
-# Pi 5
-ssh user@<pi5-ip> 'cd ~/ai_desk_agent && git pull && sudo systemctl kill ai-eink; sudo systemctl start ai-eink'
-
-# Pi Zero 2W
-ssh user@<pizero-ip> 'cd ~/ai_desk_agent && git pull && sudo systemctl restart display-server'
+ssh <user>@<pi5-ip> 'cd ~/ai_desk_agent && git pull && sudo systemctl kill ai-eink; sudo systemctl start ai-eink'
+ssh <user>@<pizero-ip> 'cd ~/ai_desk_agent && git pull && sudo systemctl restart display-server'
+ssh <user>@<pi5-ip> 'sudo journalctl -u ai-eink -f'
 ```
 
-Watch logs with:
+## Contributing
 
-```bash
-ssh user@<pi5-ip> 'sudo journalctl -u ai-eink -f'
-```
+Any commit that adds an agent tool must also add its plain-English label to `TOOL_LABELS` in `main.py`. Unmapped tools show their raw name in the UI on purpose, so a missing label is obvious.
