@@ -184,7 +184,3 @@ ssh <user>@<pi5-ip> 'cd ~/ai_desk_agent && git pull && sudo systemctl kill ai-ei
 ssh <user>@<pizero-ip> 'cd ~/ai_desk_agent && git pull && sudo systemctl restart display-server'
 ssh <user>@<pi5-ip> 'sudo journalctl -u ai-eink -f'
 ```
-
-## Contributing
-
-Any commit that adds an agent tool must also add its plain-English label to `TOOL_LABELS` in `main.py`. Unmapped tools show their raw name in the UI on purpose, so a missing label is obvious.

@@ -16,3 +16,4 @@ pomodoros.json
 pomodoro.json
 *.md
 !README.md
+!CLAUDE.md
