@@ -1,8 +1,10 @@
 # AI Roommate
 
-An autonomous AI agent that lives in your room. It watches what's going on through a camera, talks to you through a web chat and an e-ink display, and can speak out loud via text-to-speech. You don't summon it. It runs on its own loop, observing the room and deciding when to chime in.
+**An AI that lives in your room and keeps you honest about the small daily stuff.** Getting up from the desk, drinking water, staying on track instead of drifting.
 
-The real point is keeping you honest about the small daily stuff. Getting up from the desk, drinking water, staying on track instead of drifting. It tracks caffeine and pomodoros, and it remembers what you said you'd do.
+You don't summon it. It watches the room through a camera, runs on its own loop, and decides when to say something. It talks through a web chat and an e-ink display, speaks out loud if you want, tracks your caffeine and pomodoros, and remembers what you said you'd do.
+
+The camera never leaves the house. See [why the eyes are local](#why-the-eyes-are-local).
 
 ## Quick start (chat-only)
 
@@ -89,9 +91,23 @@ A shared lock allows only one vision inference at a time, so an on-demand captur
 
 ## How it works
 
-Two models split the work. A hosted brain (MiniMax M3 on OpenRouter by default) does the reasoning, tool calling, conversation, decisions, and any images or GIFs you post in chat. A local vision model handles room perception: a background thread captures frames when motion warrants it and caches the description, so the brain's `take_photo` tool returns instantly.
+Two models split the work. A hosted brain (MiniMax M3 on OpenRouter by default) does the reasoning, tool calling, conversation, and decisions. A local vision model does room perception, and nothing else: a background thread captures frames when motion warrants it and caches the description, so the brain's `take_photo` tool returns instantly.
 
-Images you post in chat go straight to the brain as multimodal content. Raw uploads stay only in the newest 30 messages and are never written to `context.json`. After that they're replaced by the post text plus the model's description of them.
+### Why the eyes are local
+
+The split is a privacy boundary, not a performance trick.
+
+A text description and a photograph are not the same risk. "One person at the desk, lamp on, laptop open, room is a mess" is about as identifying as a weather report. The frame it came from is not. That image has your face in it, your apartment, whatever is on your screen, whatever is on your floor, and a timestamp saying you were home.
+
+And it isn't only your call to make. Your roommate walking past, a partner asleep in the background, someone on a video call behind you, a friend who came over for an hour. None of them agreed to be photographed every few minutes and uploaded to a company's servers. MiniMax is a Chinese company, but that's not really the point. Every hosted model means someone else's hardware, in a jurisdiction you didn't pick, under a retention policy you didn't write.
+
+So the room camera only ever talks to a model running on hardware you own. Only the text description crosses the network. There's one exception, and it's yours to make: an image you paste into chat goes straight to the brain, because you chose to send that one.
+
+Chat uploads stay only in the newest 30 messages and are never written to `context.json`. After that they're replaced by the post text plus the model's description of them, so old photos don't accumulate in a file on disk.
+
+Everything the vision model is asked, and everything it answers, is logged locally. See [Vision audit trail](#vision-audit-trail).
+
+### The loop
 
 The brain runs an autonomous loop with no timers or hardcoded behaviors:
 
@@ -102,25 +118,7 @@ The brain runs an autonomous loop with no timers or hardcoded behaviors:
 
 When nothing is happening it idles. A chat message or button press wakes it. It paces itself, backing off when ignored and engaging more during conversation.
 
-## Full build (hardware)
-
-| Device | Role |
-|--------|------|
-| **Pi 5** (or faster) | Orchestrator. Agent loop, camera, TTS, web chat server |
-| **Pi Zero 2W** | Display server. E-ink screen (SSD1680Z, 122x250) and two GPIO buttons |
-| **Vision machine** | Local OpenAI-compatible vision server (llama.cpp or mlx-vlm) |
-
-The camera is an IMX708 capturing the full 2304x1296 sensor FOV, downscaled before it reaches the vision model. The display holds about 140 characters, which forces the AI to be concise. Longer thoughts go to chat.
-
-Interaction surfaces:
-
-- **E-ink display.** Short, punchy messages, like texts from a friend.
-- **Web chat.** Password-protected UI on port 8080. Longer messages, and you can type, paste, select, or drag in PNG, JPEG, WebP, and animated GIF files. Optional HTTPS via mkcert.
-- **Physical buttons.** Nudge the AI into saying something, or approve a proposed notification.
-- **Voice.** With `ENABLE_TTS=1`, display messages are spoken through a local Piper server. Non-blocking, and new speech interrupts old.
-- **Notifications.** The AI proposes recurring reminders like stretch breaks or "it's getting late". In `smart` mode it interprets natural chat replies; in `legacy` mode only a physical button resolves a proposal. A scoring system tracks what you actually engage with.
-
-Conversation history persists across restarts and auto-compacts at 150 messages, summarizing older ones while keeping the last 30 intact. Brave Search is available through MCP when `ENABLE_WEB_SEARCH=1`. When the room is still for 5 minutes the vision loop enters chill mode and stops burning compute on unchanged scenes.
+Conversation history persists across restarts and auto-compacts at 150 messages, summarizing older ones while keeping the last 30 intact. Brave Search is available through MCP when `ENABLE_WEB_SEARCH=1`. When the room is still for 5 minutes the vision loop enters chill mode and stops describing frames until something moves.
 
 ## Vision audit trail
 
@@ -184,3 +182,29 @@ ssh <user>@<pi5-ip> 'cd ~/ai_desk_agent && git pull && sudo systemctl kill ai-ei
 ssh <user>@<pizero-ip> 'cd ~/ai_desk_agent && git pull && sudo systemctl restart display-server'
 ssh <user>@<pi5-ip> 'sudo journalctl -u ai-eink -f'
 ```
+
+## Appendix: the full hardware build
+
+Chat-only mode is the whole agent. This is what it looks like with the hardware attached.
+
+| Device | Role |
+|--------|------|
+| **Pi 5** (or faster) | Orchestrator. Agent loop, camera, TTS, web chat server |
+| **Pi Zero 2W** | Display server. E-ink screen (SSD1680Z, 122x250) and two GPIO buttons |
+| **Vision machine** | Local OpenAI-compatible vision server (llama.cpp or mlx-vlm) |
+
+The camera is an IMX708 capturing the full 2304x1296 sensor FOV, downscaled before it reaches the vision model. It needs `dtoverlay=imx708,cam0` in `/boot/firmware/config.txt`, and the Pi 5 venv needs `--system-site-packages` because `python3-libcamera` is system-only.
+
+The display holds about 140 characters. That constraint is doing real work: it forces short, punchy messages, like texts from a friend. Longer thoughts go to chat instead.
+
+What each surface adds:
+
+- **E-ink display.** The ambient one. It's just there in your peripheral vision, no notification, no sound.
+- **Web chat.** Password-protected UI on port 8080. Longer messages, and you can type, paste, select, or drag in PNG, JPEG, WebP, and animated GIF files. Optional HTTPS via mkcert.
+- **Physical buttons.** Two GPIO buttons. Nudge the AI into saying something, or approve a proposed notification without opening a browser.
+- **Voice.** With `ENABLE_TTS=1`, display messages are spoken through a local Piper server. Non-blocking, and new speech interrupts old.
+- **Notifications.** The AI proposes recurring reminders like stretch breaks or "it's getting late". In `smart` mode it interprets natural chat replies; in `legacy` mode only a physical button resolves a proposal. A scoring system tracks what you actually engage with.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
