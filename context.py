@@ -4,6 +4,7 @@ import copy
 import json
 import os
 import time as _time
+import uuid
 from config import COMPACT_AFTER_N_MESSAGES, KEEP_LAST_N_MESSAGES, PROJECT_DIR, TOKEN_ESTIMATE_DIVISOR, MERGE_SUMMARIES_AFTER
 from logger import info
 
@@ -45,10 +46,16 @@ class Context:
             with open(CONTEXT_FILE, "r") as f:
                 self.messages = json.load(f)
             now = _time.time()
+            backfilled_ids = False
             for m in self.messages:
                 if "_ts" not in m:
                     m["_ts"] = now
+                if "_chat_id" not in m:
+                    m["_chat_id"] = self._new_chat_id()
+                    backfilled_ids = True
             repaired = self._repair_pairing()
+            if backfilled_ids and not repaired:
+                self.save()
             info(f"[CONTEXT] Loaded {len(self.messages)} messages from {CONTEXT_FILE}")
             return True
         except Exception as e:
@@ -123,27 +130,52 @@ class Context:
     def _now(self) -> float:
         return _time.time()
 
-    def add_system(self, content: str):
-        self.messages.append({"role": "system", "content": content, "_ts": self._now()})
+    @staticmethod
+    def _new_chat_id() -> str:
+        return f"c_{uuid.uuid4().hex}"
 
-    def add_user(self, content, chat_images: list | None = None):
-        msg = {"role": "user", "content": content, "_ts": self._now()}
+    def new_message(self, role: str, content=None, **metadata) -> dict:
+        """Create a stored context message with stable private identity."""
+        msg = {
+            "role": role,
+            "_ts": self._now(),
+            "_chat_id": self._new_chat_id(),
+        }
+        if content is not None:
+            msg["content"] = content
+        msg.update(metadata)
+        return msg
+
+    def add_system(self, content: str):
+        msg = self.new_message("system", content)
+        self.messages.append(msg)
+        return msg["_chat_id"]
+
+    def add_user(
+        self,
+        content,
+        chat_images: list | None = None,
+        chat_original_text: str | None = None,
+    ):
+        msg = self.new_message("user", content)
         if chat_images:
             # Private UI metadata. get_messages() strips underscore-prefixed
             # fields before sending the conversation to the model.
             msg["_chat_images"] = chat_images
+        if chat_original_text is not None:
+            msg["_chat_original_text"] = chat_original_text
         self.messages.append(msg)
+        return msg["_chat_id"]
 
     def add_image(self, photo_uri: str):
         self.messages = [m for m in self.messages if not self._is_image_message(m)]
-        self.messages.append({
-            "role": "user",
-            "content": [
+        self.messages.append(self.new_message(
+            "user",
+            [
                 {"type": "text", "text": "Here is the latest photo from the camera."},
                 {"type": "image_url", "image_url": {"url": photo_uri}},
             ],
-            "_ts": self._now(),
-        })
+        ))
 
     def note_latest_image_response(self, response_text: str) -> bool:
         """Attach the model's first visible response to the latest image post.
@@ -194,9 +226,9 @@ class Context:
             if k not in ("content", "_chat_images", "_media_description")
         }
         result["content"] = durable_text
-        if attachments:
+        if attachments or "_chat_original_text" in msg:
             # Keep compaction-only annotations out of the user-facing chat log.
-            result["_chat_original_text"] = text
+            result["_chat_original_text"] = msg.get("_chat_original_text", text)
         return result
 
     def demote_old_images(self, keep_last: int = KEEP_LAST_N_MESSAGES) -> int:
@@ -225,7 +257,7 @@ class Context:
         if not tool_calls:
             return
 
-        msg = {"role": "assistant", "_ts": self._now()}
+        msg = self.new_message("assistant", "")
         if content:
             msg["content"] = content
         else:
@@ -247,15 +279,17 @@ class Context:
         if reasoning_details:
             msg["reasoning_details"] = copy.deepcopy(reasoning_details)
         self.messages.append(msg)
+        return msg["_chat_id"]
 
     def add_tool_result(self, tool_call_id: str, name: str, result: dict):
-        self.messages.append({
-            "role": "tool",
-            "tool_call_id": tool_call_id,
-            "name": name,
-            "content": json.dumps(result),
-            "_ts": self._now(),
-        })
+        msg = self.new_message(
+            "tool",
+            json.dumps(result),
+            tool_call_id=tool_call_id,
+            name=name,
+        )
+        self.messages.append(msg)
+        return msg["_chat_id"]
 
     def get_messages(self) -> list:
         result = []
@@ -544,13 +578,12 @@ class Context:
         if system_msg:
             new_messages.append(system_msg)
         new_messages.extend(existing_summaries)
-        new_messages.append({
-            "role": "user",
-            "content": f"[Previous context summary: {date_label}] {summary}",
-            "_ts": self._now(),
-            "_ts_min": ts_min,
-            "_ts_max": ts_max,
-        })
+        new_messages.append(self.new_message(
+            "user",
+            f"[Previous context summary: {date_label}] {summary}",
+            _ts_min=ts_min,
+            _ts_max=ts_max,
+        ))
         new_messages.extend(self.messages[end:])
         self.messages = new_messages
         info(f"[CONTEXT] Compacted {to_compact_len} messages into 1 summary (~{len(summary)} chars) [{date_label}], "
@@ -649,11 +682,10 @@ class Context:
                 label = str(item["time_range"])
             else:
                 continue
-            msg = {
-                "role": "user",
-                "content": f"[Previous context summary: {label}] {item['summary']}",
-                "_ts": self._now(),
-            }
+            msg = self.new_message(
+                "user",
+                f"[Previous context summary: {label}] {item['summary']}",
+            )
             if span:
                 msg["_ts_min"], msg["_ts_max"] = span
             new_summaries.append(msg)

@@ -7,9 +7,13 @@ import signal
 import sys
 import json
 import secrets
+import copy
+import hashlib
 import socket
 import ssl
 import threading
+import uuid
+from contextlib import contextmanager
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 import requests
@@ -33,12 +37,17 @@ from config import (
     CHAT_MAX_IMAGES_PER_MESSAGE,
     CHAT_MAX_MEDIA_BYTES,
     CHAT_MAX_REQUEST_BYTES,
+    CHAT_TAKEOVER_SECONDS,
+    CHAT_SSE_MAX_STREAMS,
+    CHAT_SSE_HEARTBEAT_SECONDS,
+    CHAT_SSE_IDLE_SECONDS,
     REVIEW_INTERVAL,
     NOTIFICATION_APPROVAL_MODE,
     build_policy_reminder,
     estimate_tool_tokens,
     LLM_ESTIMATED_MAX_TOKENS,
     COMPACT_AFTER_N_MESSAGES,
+    MERGE_SUMMARIES_AFTER,
     ENABLE_CAMERA,
     ENABLE_DISPLAY,
     VISION_POLL_INTERVAL,
@@ -64,7 +73,14 @@ from status_publisher import StatusPublisher
 from context import Context
 from ai_client import AIClient, LLMError, VisionClient
 from vision_history import VisionDescriptionLog, VisionRequestHistory
-from chat_media import ChatMediaError, build_chat_message, media_data_from_message
+from chat_media import (
+    ChatMediaError,
+    build_chat_message,
+    media_data_from_message,
+    merge_queued_messages,
+    queued_message_payload,
+    update_queued_text,
+)
 from reolink import ReoLinkCamera
 from mcp_client import MCPClient
 from sounds import play as play_sound
@@ -108,6 +124,109 @@ def _visible_response_text(response: dict) -> str:
     return "\n".join(dict.fromkeys(parts))
 
 
+LONG_ACTION_TOOLS = {"take_photo", "capture_photo", "take_reolink_photo"}
+
+TOOL_LABELS = {
+    "take_photo": "checking the room camera",
+    "capture_photo": "capturing a fresh room photo",
+    "take_reolink_photo": "capturing a security-camera photo",
+    "update_display": "updating the display",
+    "send_chat_message": "sending a chat message",
+    "update_vision_requests": "updating vision requests",
+    "flash_ir_light": "adjusting infrared light",
+    "flash_camera_light": "adjusting camera light",
+    "log_drink": "logging a drink",
+    "list_drinks": "checking the drink log",
+    "edit_drink": "editing the drink log",
+    "log_pomodoro": "logging a pomodoro",
+    "list_pomodoros": "checking pomodoro history",
+    "edit_pomodoro": "editing pomodoro history",
+    "pomodoro_stats": "calculating pomodoro stats",
+    "enter_pomodoro_mode": "starting pomodoro mode",
+    "exit_pomodoro_mode": "ending pomodoro mode",
+    "propose_notification": "proposing a notification",
+    "resolve_notification_proposal": "resolving a notification",
+    "schedule_notification": "scheduling a notification",
+    "delete_notification": "deleting a notification",
+    "brave_web_search": "searching the web",
+    "brave_local_search": "searching nearby places",
+    "brave_image_search": "searching images",
+    "brave_video_search": "searching videos",
+    "brave_news_search": "searching the news",
+    "brave_summarizer": "summarizing search results",
+}
+
+CHAT_STATIC_ASSETS = ("chat.css", "chat.mjs", "chat_model.mjs")
+
+
+def _chat_asset_version(static_dir: str) -> str:
+    """Return the restart-stable cache key for all transitive chat assets."""
+    digest = hashlib.sha256()
+    for filename in CHAT_STATIC_ASSETS:
+        with open(os.path.join(static_dir, filename), "rb") as asset:
+            digest.update(asset.read())
+    return digest.hexdigest()[:12]
+
+
+class ChatUIState:
+    """Thread-safe agent state and chat invalidation publisher."""
+
+    def __init__(self):
+        self.condition = threading.Condition()
+        self.server_id = uuid.uuid4().hex
+        self.agent = {
+            "mode": "sleeping",
+            "detail": "",
+            "locks_input": False,
+            "revision": 0,
+        }
+        self.chat_revision = 0
+        self.event_revision = 0
+
+    def snapshot(self) -> dict:
+        with self.condition:
+            return self._snapshot_locked()
+
+    def _snapshot_locked(self) -> dict:
+        return {
+            "agent": dict(self.agent),
+            "server_id": self.server_id,
+            "chat_revision": self.chat_revision,
+            "event_revision": self.event_revision,
+        }
+
+    def set_agent(self, mode: str, detail: str = "", locks_input: bool = False):
+        with self.condition:
+            changed = (
+                self.agent["mode"] != mode
+                or self.agent["detail"] != detail
+                or self.agent["locks_input"] != bool(locks_input)
+            )
+            if not changed:
+                return
+            self.agent = {
+                "mode": mode,
+                "detail": detail,
+                "locks_input": bool(locks_input),
+                "revision": self.agent["revision"] + 1,
+            }
+            self.event_revision += 1
+            self.condition.notify_all()
+
+    def chat_changed(self):
+        with self.condition:
+            self.chat_revision += 1
+            self.event_revision += 1
+            self.condition.notify_all()
+
+    def wait_after(self, revision: int, timeout: float) -> tuple[dict, bool]:
+        with self.condition:
+            if self.event_revision == revision:
+                self.condition.wait(timeout)
+            changed = self.event_revision != revision
+            return self._snapshot_locked(), changed
+
+
 class Orchestrator:
     def __init__(self):
         self.ctx = Context()
@@ -139,11 +258,15 @@ class Orchestrator:
         self.running = True
         self.last_display_time = 0
         self.chat_event = threading.Event()
-        # Entries are either legacy text strings or {"content": multipart,
-        # "chat_images": UI metadata} for user-uploaded images/GIFs.
+        # Homogeneous dictionaries with stable queue IDs and optional media.
         self.chat_queue = []
         self.chat_queue_lock = threading.Lock()
         self.ctx_lock = threading.Lock()
+        # Serializes cross-source snapshots and queue/context transfers without
+        # making ordinary reads hold ctx_lock and chat_queue_lock together.
+        self.chat_transfer_lock = threading.Lock()
+        self.ui_state = ChatUIState()
+        self.sse_slots = threading.BoundedSemaphore(max(1, CHAT_SSE_MAX_STREAMS))
         self.mcp_tools = []
         self.mcp = None
         self.notification_store = NotificationStore()
@@ -188,10 +311,6 @@ class Orchestrator:
         self.vision_mode = "chill"  # "chill" when no motion, "active" when motion detected
         self.vision_requests_shown = False  # tracks if we've shown existing requests this turn
 
-        # Status tracking for chat UI
-        self.status_message = ""
-        self.status_lock = threading.Lock()
-
         # Chat auth — persist session token across restarts
         self._token_file = os.path.join(PROJECT_DIR, ".session_token")
         self.session_token = ""
@@ -228,6 +347,159 @@ class Orchestrator:
     def _handle_signal(self, signum, frame):
         info("\nShutting down...")
         self.running = False
+        with self.ui_state.condition:
+            self.ui_state.condition.notify_all()
+
+    def _set_agent_state(self, mode: str, detail: str = "", locks_input: bool = False):
+        self.ui_state.set_agent(mode, detail, locks_input)
+
+    @contextmanager
+    def _blocked_agent_state(self, detail: str, locks_input: bool):
+        previous = self.ui_state.snapshot()["agent"]
+        self._set_agent_state("blocked", detail, locks_input)
+        try:
+            yield
+        finally:
+            self._set_agent_state(
+                previous["mode"],
+                previous["detail"],
+                previous["locks_input"],
+            )
+
+    def _llm_backoff_sleep(self, seconds: float):
+        with self._blocked_agent_state("LLM backoff after failures", False):
+            time.sleep(seconds)
+
+    @staticmethod
+    def _chat_time(ts: float | None) -> str:
+        if not ts:
+            return ""
+        return time.strftime("%-I:%M%p %a", time.localtime(ts)).lower().lstrip("0")
+
+    def _queue_bubble(self, entry: dict) -> dict:
+        images = [
+            {
+                "url": f"/chat/media/{attachment['id']}",
+                "name": attachment.get("name", "image"),
+                "type": attachment.get("type", ""),
+            }
+            for attachment in entry.get("chat_images", [])
+            if isinstance(attachment, dict) and attachment.get("id")
+        ]
+        return {
+            "id": entry["id"],
+            "role": "user",
+            "content": str(entry.get("text", "")),
+            "images": images,
+            "time": self._chat_time(entry.get("created_at")),
+            "queued": True,
+        }
+
+    def _sync_chat_event_locked(self):
+        if self.chat_queue:
+            self.chat_event.set()
+        else:
+            self.chat_event.clear()
+
+    def _snapshot_chat_sources(self) -> tuple[list, list]:
+        """Return a transfer-consistent context/queue snapshot.
+
+        The transaction gate prevents a sweep between the sequential copies, so
+        this read path never holds both data locks at once.
+        """
+        with self.chat_transfer_lock:
+            with self.ctx_lock:
+                context_messages = copy.deepcopy(self.ctx.messages)
+            with self.chat_queue_lock:
+                queued_messages = copy.deepcopy(self.chat_queue)
+        return context_messages, queued_messages
+
+    def _find_chat_media(self, media_id: str):
+        with self.chat_transfer_lock:
+            with self.ctx_lock:
+                for msg in reversed(self.ctx.messages):
+                    found = media_data_from_message(msg, media_id)
+                    if found:
+                        return found
+            with self.chat_queue_lock:
+                for entry in reversed(self.chat_queue):
+                    queued_msg = {
+                        "content": entry.get("content", []),
+                        "_chat_images": entry.get("chat_images", []),
+                    }
+                    found = media_data_from_message(queued_msg, media_id)
+                    if found:
+                        return found
+        return None
+
+    def _undo_queued_message(self, queue_id: str) -> dict | None:
+        restored = None
+        with self.chat_transfer_lock:
+            with self.chat_queue_lock:
+                for index, entry in enumerate(self.chat_queue):
+                    if entry.get("id") == queue_id:
+                        removed = self.chat_queue.pop(index)
+                        # Serialize while the transaction gate still excludes a
+                        # competing sweep or media lookup. The response remains
+                        # self-contained after the queue record disappears.
+                        restored = queued_message_payload(removed)
+                        self._sync_chat_event_locked()
+                        break
+        if restored is not None:
+            self.ui_state.chat_changed()
+            return restored
+        return None
+
+    def _edit_queued_message(self, queue_id: str, message: str) -> dict | None:
+        updated = None
+        with self.chat_transfer_lock:
+            with self.chat_queue_lock:
+                for entry in self.chat_queue:
+                    if entry.get("id") == queue_id:
+                        update_queued_text(entry, message)
+                        updated = copy.deepcopy(entry)
+                        break
+        if updated is not None:
+            self.ui_state.chat_changed()
+            return self._queue_bubble(updated)
+        return None
+
+    def _sweep_chat_queue(self) -> str | None:
+        """Merge the queue into one context message at a wait boundary."""
+        with self.chat_transfer_lock:
+            with self.chat_queue_lock:
+                boundary_entries = copy.deepcopy(self.chat_queue)
+                boundary_ids = [entry.get("id") for entry in boundary_entries]
+                if not boundary_entries:
+                    self._sync_chat_event_locked()
+                    return None
+
+            content, chat_images, visible_text, dropped = merge_queued_messages(
+                boundary_entries
+            )
+
+            with self.ctx_lock:
+                with self.chat_queue_lock:
+                    current_ids = [
+                        entry.get("id")
+                        for entry in self.chat_queue[:len(boundary_ids)]
+                    ]
+                    if current_ids != boundary_ids:
+                        raise RuntimeError("chat queue changed during sweep preparation")
+                    del self.chat_queue[:len(boundary_ids)]
+                    context_id = self.ctx.add_user(
+                        content,
+                        chat_images=chat_images,
+                        chat_original_text=visible_text,
+                    )
+                    self._sync_chat_event_locked()
+
+        info(
+            f"[CHAT] Swept {len(boundary_entries)} queued message(s) into "
+            f"{context_id}; dropped {dropped} image(s)"
+        )
+        self.ui_state.chat_changed()
+        return context_id
 
     def run(self):
         if self.camera:
@@ -253,7 +525,7 @@ class Orchestrator:
                     self.ctx.messages[0]["content"] = prompt
                     info("[CONTEXT] Refreshed system prompt in loaded context.")
                 else:
-                    self.ctx.messages.insert(0, {"role": "system", "content": prompt, "_ts": self.ctx._now()})
+                    self.ctx.messages.insert(0, self.ctx.new_message("system", prompt))
                     info("[CONTEXT] Inserted system prompt into loaded context.")
                 if ENABLE_CAMERA:
                     self.ctx.add_user("A restart just occurred. Resume where you left off.")
@@ -265,6 +537,7 @@ class Orchestrator:
                     self.ctx.add_user("You just woke up! Use take_photo to see the room and say hi.")
                 else:
                     self.ctx.add_user("You just woke up! Note: camera/vision tools are not available. Use your other tools to say hi.")
+        self.ui_state.chat_changed()
         info("Entering agent loop.")
 
         while self.running:
@@ -275,7 +548,7 @@ class Orchestrator:
                 self._llm_failures += 1
                 delay = self._llm_backoff_seconds()
                 info(f"[FATAL] Backing off for {delay}s")
-                time.sleep(delay)
+                self._llm_backoff_sleep(delay)
             except Exception as e:
                 info(f"[ERROR] {e}")
                 time.sleep(5)
@@ -283,28 +556,10 @@ class Orchestrator:
         self.cleanup()
 
     def _turn(self):
-        tool_call_count = 0
-        last_tool_name = None
-
         while self.running:
             tools = list(get_tool_definitions())
             if self.mcp_tools:
                 tools.extend(self.mcp_tools)
-
-            # Drain queued chat messages into context at a safe point
-            with self.chat_queue_lock:
-                queued = list(self.chat_queue)
-                self.chat_queue.clear()
-            if queued:
-                with self.ctx_lock:
-                    for msg in queued:
-                        if isinstance(msg, dict):
-                            self.ctx.add_user(
-                                msg.get("content", ""),
-                                chat_images=msg.get("chat_images"),
-                            )
-                        else:
-                            self.ctx.add_user(msg)
 
             with self.ctx_lock:
                 self.ctx.demote_old_images()
@@ -316,15 +571,12 @@ class Orchestrator:
             estimated = msg_tokens + estimate_tool_tokens(tools) + len(reminder) // 4
             if estimated > LLM_ESTIMATED_MAX_TOKENS:
                 info(f"[LLM] Token estimate {estimated} exceeds limit {LLM_ESTIMATED_MAX_TOKENS}, compacting...")
-                with self.status_lock:
-                    self.status_message = "Compacting memory..."
-                try:
-                    self.ctx.check_compact(self.ai, self.ctx_lock)
-                except LLMError as e:
-                    info(f"[LLM] Compaction failed during token overflow: {e}")
-                finally:
-                    with self.status_lock:
-                        self.status_message = ""
+                with self._blocked_agent_state("compacting memory", True):
+                    try:
+                        self.ctx.check_compact(self.ai, self.ctx_lock)
+                    except LLMError as e:
+                        info(f"[LLM] Compaction failed during token overflow: {e}")
+                self.ui_state.chat_changed()
                 with self.ctx_lock:
                     messages = self.ctx.get_messages()
                     msg_tokens = self.ctx.total_tokens()
@@ -334,6 +586,7 @@ class Orchestrator:
                 info(f"[LLM] After compaction: ~{msg_tokens} msg tokens + {estimate_tool_tokens(tools)} tool tokens = ~{estimated} total")
             info(f"[LLM] Sending {len(messages)} messages (~{msg_tokens} msg tokens, ~{estimate_tool_tokens(tools)} tool tokens, ~{estimated} total)...")
             play_sound("thinking")
+            self._set_agent_state("thinking")
             try:
                 response = self.ai.chat_with_tools(messages, tools)
             except LLMError as e:
@@ -341,10 +594,12 @@ class Orchestrator:
                 err_str = str(e)
                 if "exceed_context_size_error" in err_str or "exceeds the available context size" in err_str:
                     info(f"[LLM] Context overflow detected, triggering compaction...")
-                    try:
-                        self.ctx.check_compact(self.ai, self.ctx_lock)
-                    except LLMError as ce:
-                        info(f"[LLM] Compaction failed during overflow: {ce}")
+                    with self._blocked_agent_state("compacting memory", True):
+                        try:
+                            self.ctx.check_compact(self.ai, self.ctx_lock)
+                        except LLMError as ce:
+                            info(f"[LLM] Compaction failed during overflow: {ce}")
+                    self.ui_state.chat_changed()
                     time.sleep(1)
                     continue
                 if not recoverable:
@@ -354,7 +609,7 @@ class Orchestrator:
                     delay = self._llm_backoff_seconds()
                     info(f"[LLM] Backing off for {delay}s ({self._llm_failures} consecutive failures)")
                     self._display_error(f"LLM API error ({e.status_code}). Retrying in {delay // 60}m...")
-                    time.sleep(delay)
+                    self._llm_backoff_sleep(delay)
                     continue
                 else:
                     info(f"[LLM] Recoverable error (HTTP {e.status_code}), backing off: {e}")
@@ -362,7 +617,7 @@ class Orchestrator:
                     self._last_llm_fail = time.time()
                     delay = min(self._llm_backoff_seconds(), 120)  # cap transient retries at 2min
                     info(f"[LLM] Backing off for {delay}s ({self._llm_failures} consecutive failures)")
-                    time.sleep(delay)
+                    self._llm_backoff_sleep(delay)
                     continue
             except (requests.Timeout, requests.ConnectionError) as e:
                 info(f"[LLM] Network error: {e}")
@@ -370,13 +625,13 @@ class Orchestrator:
                 self._last_llm_fail = time.time()
                 delay = min(self._llm_backoff_seconds(), 120)
                 info(f"[LLM] Backing off for {delay}s")
-                time.sleep(delay)
+                self._llm_backoff_sleep(delay)
                 continue
             except Exception as e:
                 info(f"[LLM] Unexpected error: {e}")
                 self._llm_failures += 1
                 self._last_llm_fail = time.time()
-                time.sleep(5)
+                self._llm_backoff_sleep(5)
                 continue
 
             self._llm_failures = 0
@@ -386,6 +641,8 @@ class Orchestrator:
                 self.ctx.note_latest_image_response(
                     _visible_response_text(response)
                 )
+            if response["tool_calls"]:
+                self.ui_state.chat_changed()
 
             if response["reasoning"]:
                 info(f"[REASONING] {response['reasoning'][:200]}...")
@@ -400,70 +657,79 @@ class Orchestrator:
                     content = response["content"]
                     if len(content) > 140:
                         info(f"[AUTO-CHAT] AI returned long content without tool call, sending to chat...")
-                        result = self._tool_send_chat_message({"text": content})
+                        result = self._execute_tool("send_chat_message", {"text": content})
                     else:
                         info(f"[AUTO-DISPLAY] AI returned content without update_display, showing it...")
-                        result = self._tool_update_display({"text": content})
+                        result = self._execute_tool("update_display", {"text": content})
                     if result.get("status") == "ok":
-                        self._tool_wait({})
+                        self._execute_tool("wait", {})
+                        self._sweep_chat_queue()
                     continue
                 info("[IDLE] AI produced no tool calls. Waiting...")
                 self._idle_wait()
                 return
 
-            # Execute all tool calls, deferring user messages until after
-            # all tool results are added (OpenRouter requires tool results
-            # to immediately follow the assistant message, no interleaving)
-            deferred_user_msgs = []
-
-            for tc in response["tool_calls"]:
-                tool_call_count += 1
-                last_tool_name = tc["name"]
-                info(f"[TOOL] {tc['name']}({tc['arguments']})")
-                try:
-                    result = self._execute_tool(tc["name"], tc["arguments"])
-                except Exception as e:
-                    result = {"status": "error", "message": f"Tool execution failed: {e}"}
-                    info(f"[TOOL ERROR] {e}")
-                info(f"[TOOL RESULT] {json.dumps(result)[:200]}")
-                info(f"[TOOL RESULT] {json.dumps(result)}")
-                with self.ctx_lock:
-                    self.ctx.add_tool_result(tc["id"], tc["name"], result)
-                user_msg = result.get("user_message")
-                if user_msg:
-                    deferred_user_msgs.append(user_msg)
-
-            # Now add deferred user messages (after all tool results)
-            if deferred_user_msgs:
-                with self.ctx_lock:
-                    for msg in deferred_user_msgs:
-                        self.ctx.add_user(msg)
+            self._execute_tool_batch(response["tool_calls"])
 
             try:
                 with self.ctx_lock:
                     self.ctx.demote_old_images()
                     will_compact = len(self.ctx.messages) >= COMPACT_AFTER_N_MESSAGES
                 if will_compact:
-                    with self.status_lock:
-                        self.status_message = "Compacting memory..."
-                try:
+                    with self._blocked_agent_state("compacting memory", True):
+                        self.ctx.check_compact(self.ai, self.ctx_lock)
+                    self.ui_state.chat_changed()
+                else:
                     self.ctx.check_compact(self.ai, self.ctx_lock)
-                finally:
-                    if will_compact:
-                        with self.status_lock:
-                            self.status_message = ""
                 # Only merge summaries when user is away (chill mode) to avoid
                 # blocking the agent loop with back-to-back LLM calls
                 if self.vision_mode == "chill" or not ENABLE_CAMERA:
-                    with self.status_lock:
-                        self.status_message = "Merging memory..."
-                    try:
-                        self.ctx.check_merge_summaries(self.ai, self.ctx_lock)
-                    finally:
-                        with self.status_lock:
-                            self.status_message = ""
+                    with self.ctx_lock:
+                        will_merge = sum(
+                            1 for msg in self.ctx.messages if self.ctx._is_summary(msg)
+                        ) > MERGE_SUMMARIES_AFTER
+                    if will_merge:
+                        with self._blocked_agent_state("merging memory", True):
+                            self.ctx.check_merge_summaries(self.ai, self.ctx_lock)
+                        self.ui_state.chat_changed()
             except LLMError as e:
                 info(f"[LLM] Compaction failed: {e}")
+
+    def _execute_tool_batch(self, tool_calls: list[dict]):
+        """Execute a complete model-emitted batch, then honor a wait sweep."""
+        deferred_user_msgs = []
+        saw_wait = False
+
+        for tool_call in tool_calls:
+            name = tool_call["name"]
+            if name == "wait":
+                saw_wait = True
+            info(f"[TOOL] {name}({tool_call['arguments']})")
+            try:
+                result = self._execute_tool(name, tool_call["arguments"])
+            except Exception as error:
+                result = {
+                    "status": "error",
+                    "message": f"Tool execution failed: {error}",
+                }
+                info(f"[TOOL ERROR] {error}")
+            info(f"[TOOL RESULT] {json.dumps(result)[:200]}")
+            info(f"[TOOL RESULT] {json.dumps(result)}")
+            with self.ctx_lock:
+                self.ctx.add_tool_result(tool_call["id"], name, result)
+            user_message = result.get("user_message")
+            if user_message:
+                deferred_user_msgs.append(user_message)
+
+        if deferred_user_msgs:
+            with self.ctx_lock:
+                for message in deferred_user_msgs:
+                    self.ctx.add_user(message)
+
+        # No call is skipped or synthesized. The sweep happens only after every
+        # real result has closed the assistant/tool pairing.
+        if saw_wait:
+            self._sweep_chat_queue()
 
     def _llm_backoff_seconds(self) -> int:
         n = max(self._llm_failures - 1, 0)
@@ -482,6 +748,17 @@ class Orchestrator:
             pass
 
     def _execute_tool(self, name: str, args: dict) -> dict:
+        if name == "wait":
+            self._set_agent_state("sleeping")
+        else:
+            mode = "acting_long" if name in LONG_ACTION_TOOLS else "acting"
+            self._set_agent_state(mode, TOOL_LABELS.get(name, name))
+        try:
+            return self._dispatch_tool(name, args)
+        finally:
+            self._set_agent_state("thinking")
+
+    def _dispatch_tool(self, name: str, args: dict) -> dict:
         if name == "take_photo":
             if not ENABLE_CAMERA:
                 return {"error": "Camera is disabled. Use other tools instead."}
@@ -905,7 +1182,6 @@ class Orchestrator:
         start = time.monotonic()
         while time.monotonic() - start < seconds:
             if self.chat_event.is_set():
-                self.chat_event.clear()
                 self._note_pomodoro_activity()
                 waited = int(time.monotonic() - start)
                 info(f"[WAIT] Interrupted by chat message after {waited}s")
@@ -1386,12 +1662,22 @@ class Orchestrator:
 
 
     def _idle_wait(self):
+        self._set_agent_state("sleeping")
+        try:
+            # Falling into idle is itself a wait boundary, even if a post
+            # arrived just before the idle loop began.
+            self._sweep_chat_queue()
+            return self._idle_wait_impl()
+        finally:
+            self._set_agent_state("thinking")
+
+    def _idle_wait_impl(self):
         for _ in range(IDLE_TIMEOUT):
             if not self.running:
                 return
             if self.chat_event.is_set():
-                self.chat_event.clear()
                 self._note_pomodoro_activity()
+                self._sweep_chat_queue()
                 return
             if self.motion_event.is_set():
                 self.motion_event.clear()
@@ -1433,7 +1719,9 @@ class Orchestrator:
 
                     info("[IDLE] Interrupted by button press")
                     return
-            time.sleep(1)
+            # Preserve the one-second hardware polling cadence while allowing a
+            # chat POST to wake an idle agent immediately.
+            self.chat_event.wait(1)
         with self.ctx_lock:
             if ENABLE_CAMERA:
                 self.ctx.add_user(
@@ -1448,6 +1736,11 @@ class Orchestrator:
         ChatHandler.orchestrator = self
         ChatHandler.session_token = self.session_token
         ChatHandler.use_https = CHAT_USE_HTTPS
+        try:
+            ChatHandler.asset_version = _chat_asset_version(ChatHandler.static_dir)
+        except OSError as error:
+            info(f"[CHAT] Could not hash static assets: {error}")
+            ChatHandler.asset_version = "missing"
 
         ssl_ctx = None
         if CHAT_USE_HTTPS:
@@ -1508,263 +1801,6 @@ class Orchestrator:
         info("Done.")
 
 
-CHAT_HTML = """<!DOCTYPE html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AI Friend Chat</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:system-ui,sans-serif;background:#1a1a2e;color:#e0e0e0;height:100vh;display:flex;flex-direction:column}
-#status-banner{display:none;background:#e94560;color:#fff;text-align:center;padding:8px;font-size:13px;font-weight:600}
-#status-banner.show{display:block}
-#messages{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:12px}
-.msg-wrap{display:flex;flex-direction:column;max-width:80%}
-.msg-wrap.user{align-self:flex-end}
-.msg-wrap.assistant{align-self:flex-start}
-.role{font-size:11px;opacity:0.6;margin-bottom:3px;padding:0 4px}
-.msg-wrap.user .role{text-align:right}
-.msg{padding:10px 14px;border-radius:12px;word-wrap:break-word;line-height:1.4}
-.msg-wrap.user .msg{background:#0f3460;color:#e0e0e0}
-.msg-wrap.assistant .msg{background:#16213e;color:#e0e0e0}
-.media-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:8px}
-.media-grid:empty{display:none}
-.chat-media{display:block;max-width:100%;max-height:360px;border-radius:8px;object-fit:contain;background:#0b1224}
-#composer{background:#16213e;border-top:1px solid #0f3460}
-#attachments{display:none;gap:8px;padding:10px 12px 0;overflow-x:auto}
-#attachments.show{display:flex}
-.attachment{position:relative;flex:0 0 80px;height:64px}
-.attachment img{width:80px;height:64px;object-fit:cover;border-radius:8px;border:1px solid #0f3460}
-.attachment button{position:absolute;right:-5px;top:-7px;width:22px;height:22px;padding:0;border-radius:50%;font-size:14px;line-height:22px}
-#upload-error{display:none;color:#ff8ca0;font-size:12px;padding:7px 14px 0}
-#upload-error.show{display:block}
-#form{display:flex;gap:8px;padding:12px;background:#16213e;border-top:1px solid #0f3460}
-#input{flex:1;padding:10px 14px;border:1px solid #0f3460;border-radius:20px;background:#1a1a2e;color:#e0e0e0;font-size:15px;outline:none}
-#input:focus{border-color:#e94560}
-#input:disabled{opacity:0.4;cursor:not-allowed}
-button{padding:10px 20px;background:#e94560;color:#fff;border:none;border-radius:20px;font-size:15px;cursor:pointer}
-button:hover{background:#c73e54}
-button:disabled{opacity:0.4;cursor:not-allowed}
-#attach{padding:10px 14px;background:#0f3460}
-#attach:hover{background:#174b82}
-body.dragging:after{content:'Drop images or GIFs to attach';position:fixed;inset:12px;display:flex;align-items:center;justify-content:center;border:3px dashed #e94560;border-radius:16px;background:rgba(26,26,46,.92);color:#fff;font-size:20px;font-weight:600;z-index:10;pointer-events:none}
-</style></head><body>
-<div id="status-banner"></div>
-<div id="messages"></div>
-<div id="composer">
-<div id="upload-error"></div>
-<div id="attachments"></div>
-<form id="form">
-<input id="file-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
-<button id="attach" type="button" title="Attach images or GIFs">Image</button>
-<input id="input" placeholder="Say something..." autocomplete="off">
-<button id="send" type="submit">Send</button>
-</form>
-</div>
-<script>
-const div=document.getElementById('messages');
-const banner=document.getElementById('status-banner');
-const form=document.getElementById('form');
-const input=document.getElementById('input');
-const attach=document.getElementById('attach');
-const fileInput=document.getElementById('file-input');
-const attachmentDiv=document.getElementById('attachments');
-const uploadError=document.getElementById('upload-error');
-const rendered=new Set();
-const allowedTypes=new Set(['image/png','image/jpeg','image/webp','image/gif']);
-const maxImages=__CHAT_MAX_IMAGES__;
-const maxMediaBytes=__CHAT_MAX_MEDIA_BYTES__;
-let selectedFiles=[];
-let initialized=false;
-let sending=false;
-
-function escapeHTML(value){
-  return String(value??'').replace(/[&<>"']/g,ch=>({
-    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
-  })[ch]);
-}
-
-function msgKey(m){
-  const images=(m.images||[]).map(i=>i.url).join(',');
-  return m.role+'|'+(m.content||'').slice(0,80)+'|'+images+'|'+(m.time||'');
-}
-
-function msgHTML(m){
-  const text=escapeHTML(m.content||'').replace(/\\n/g,'<br>');
-  const images=(m.images||[]).map(i=>
-    `<a href="${escapeHTML(i.url)}" target="_blank" rel="noopener"><img class="chat-media" src="${escapeHTML(i.url)}" alt="${escapeHTML(i.name||'Uploaded image')}" loading="lazy"></a>`
-  ).join('');
-  return `<div class="msg-wrap ${escapeHTML(m.role)}"><div class="role">${escapeHTML(m.role)}${m.time?' · '+escapeHTML(m.time):''}</div><div class="msg">${text}<div class="media-grid">${images}</div></div></div>`;
-}
-
-function atBottom(){
-  return div.scrollHeight-div.scrollTop-div.clientHeight<60;
-}
-
-function updateStatus(status){
-  if(status){
-    banner.textContent=status;
-    banner.classList.add('show');
-    input.disabled=true;
-    form.querySelectorAll('button').forEach(button=>button.disabled=true);
-  }else{
-    banner.classList.remove('show');
-    input.disabled=false;
-    if(!sending)form.querySelectorAll('button').forEach(button=>button.disabled=false);
-  }
-}
-
-function showUploadError(message=''){
-  uploadError.textContent=message;
-  uploadError.classList.toggle('show',Boolean(message));
-}
-
-function renderAttachments(){
-  attachmentDiv.innerHTML=selectedFiles.map((item,index)=>
-    `<div class="attachment"><img src="${item.url}" alt="${escapeHTML(item.file.name)}"><button type="button" data-remove="${index}" title="Remove attachment">x</button></div>`
-  ).join('');
-  attachmentDiv.classList.toggle('show',selectedFiles.length>0);
-}
-
-function clearAttachments(){
-  selectedFiles.forEach(item=>URL.revokeObjectURL(item.url));
-  selectedFiles=[];
-  fileInput.value='';
-  renderAttachments();
-}
-
-function addFiles(files){
-  showUploadError();
-  for(const file of files){
-    if(!allowedTypes.has(file.type)){
-      showUploadError(`${file.name} is not a supported image or GIF.`);
-      continue;
-    }
-    if(selectedFiles.length>=maxImages){
-      showUploadError(`You can attach up to ${maxImages} files.`);
-      break;
-    }
-    const duplicate=selectedFiles.some(item=>
-      item.file.name===file.name&&item.file.size===file.size&&item.file.lastModified===file.lastModified
-    );
-    const total=selectedFiles.reduce((sum,item)=>sum+item.file.size,0);
-    if(!duplicate&&total+file.size>maxMediaBytes){
-      showUploadError(`Attachments can total at most ${Math.floor(maxMediaBytes/1024/1024)} MB.`);
-      continue;
-    }
-    if(!duplicate)selectedFiles.push({file,url:URL.createObjectURL(file)});
-  }
-  renderAttachments();
-}
-
-function filePayload(item){
-  return new Promise((resolve,reject)=>{
-    const reader=new FileReader();
-    reader.onload=()=>resolve({
-      name:item.file.name,
-      type:item.file.type,
-      data_url:reader.result
-    });
-    reader.onerror=()=>reject(new Error(`Could not read ${item.file.name}.`));
-    reader.readAsDataURL(item.file);
-  });
-}
-
-async function refresh(){
-  try{
-    const r=await fetch('/chat');
-    const data=await r.json();
-    updateStatus(data.status||'');
-    const msgs=data.messages||[];
-    if(!initialized){
-      div.innerHTML=msgs.map(msgHTML).join('');
-      msgs.forEach(m=>rendered.add(msgKey(m)));
-      initialized=true;
-      div.scrollTop=div.scrollHeight;
-      return;
-    }
-    const wasAtBottom=atBottom();
-    let added=false;
-    for(const m of msgs){
-      const key=msgKey(m);
-      if(!rendered.has(key)){
-        div.insertAdjacentHTML('beforeend',msgHTML(m));
-        rendered.add(key);
-        added=true;
-      }
-    }
-    if(added&&wasAtBottom)div.scrollTop=div.scrollHeight;
-  }catch(e){}
-}
-setInterval(refresh,2000);
-refresh();
-attach.onclick=()=>fileInput.click();
-fileInput.onchange=()=>addFiles(fileInput.files);
-attachmentDiv.onclick=e=>{
-  const button=e.target.closest('[data-remove]');
-  if(!button)return;
-  const index=Number(button.dataset.remove);
-  const removed=selectedFiles.splice(index,1)[0];
-  if(removed)URL.revokeObjectURL(removed.url);
-  renderAttachments();
-};
-let dragDepth=0;
-document.addEventListener('dragenter',e=>{
-  if(Array.from(e.dataTransfer?.items||[]).some(item=>item.kind==='file')){
-    dragDepth++;
-    document.body.classList.add('dragging');
-  }
-});
-document.addEventListener('dragleave',()=>{
-  dragDepth=Math.max(0,dragDepth-1);
-  if(!dragDepth)document.body.classList.remove('dragging');
-});
-document.addEventListener('dragover',e=>e.preventDefault());
-document.addEventListener('drop',e=>{
-  e.preventDefault();
-  dragDepth=0;
-  document.body.classList.remove('dragging');
-  addFiles(e.dataTransfer?.files||[]);
-});
-document.addEventListener('paste',e=>{
-  const files=Array.from(e.clipboardData?.files||[]).filter(file=>allowedTypes.has(file.type));
-  if(files.length){
-    e.preventDefault();
-    addFiles(files);
-  }
-});
-form.onsubmit=async e=>{
-  e.preventDefault();
-  const msg=input.value.trim();
-  if((!msg&&!selectedFiles.length)||sending)return;
-  sending=true;
-  showUploadError();
-  input.disabled=true;
-  form.querySelectorAll('button').forEach(button=>button.disabled=true);
-  try{
-    const images=await Promise.all(selectedFiles.map(filePayload));
-    const resp=await fetch('/chat',{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({message:msg,images})
-    });
-    let data={};
-    try{data=await resp.json();}catch(e){}
-    if(!resp.ok)throw new Error(data.error||`Upload failed (${resp.status}).`);
-    input.value='';
-    clearAttachments();
-    setTimeout(refresh,500);
-  }catch(error){
-    showUploadError(error.message||'Could not send that message.');
-  }finally{
-    sending=false;
-    if(!banner.classList.contains('show')){
-      input.disabled=false;
-      form.querySelectorAll('button').forEach(button=>button.disabled=false);
-      input.focus();
-    }
-  }
-};
-</script></body></html>"""
-
 LOGIN_HTML = """<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AI Friend — Login</title>
@@ -1810,6 +1846,8 @@ class ChatHandler(BaseHTTPRequestHandler):
     orchestrator = None
     session_token = None
     use_https = False
+    asset_version = "dev"
+    static_dir = os.path.join(PROJECT_DIR, "static")
 
     def log_message(self, format, *args):
         pass  # suppress default access logs
@@ -1830,7 +1868,7 @@ class ChatHandler(BaseHTTPRequestHandler):
     def _require_auth(self):
         if self._check_auth():
             return True
-        if self.path.startswith("/chat"):
+        if self.path.startswith("/chat") or self.path.startswith("/static/"):
             self.send_error(401)
         else:
             self._send_login()
@@ -1882,10 +1920,22 @@ class ChatHandler(BaseHTTPRequestHandler):
             if not self._require_auth():
                 return
             self._get_messages()
+        elif path == "/chat/events":
+            if not self._require_auth():
+                return
+            self._serve_events()
         elif path.startswith("/chat/media/"):
             if not self._require_auth():
                 return
             self._get_media()
+        elif path in (
+            "/static/chat.css",
+            "/static/chat.mjs",
+            "/static/chat_model.mjs",
+        ):
+            if not self._require_auth():
+                return
+            self._serve_static(path)
         else:
             self.send_error(404)
 
@@ -1901,6 +1951,28 @@ class ChatHandler(BaseHTTPRequestHandler):
             self._post_message()
         else:
             self.send_error(404)
+
+    def do_PATCH(self):
+        if self._plaintext_on_tls():
+            return self._redirect_to_https()
+        path = self.path.split("?", 1)[0]
+        if not path.startswith("/chat/queue/"):
+            self.send_error(404)
+            return
+        if not self._require_auth():
+            return
+        self._patch_queued_message(path.removeprefix("/chat/queue/"))
+
+    def do_DELETE(self):
+        if self._plaintext_on_tls():
+            return self._redirect_to_https()
+        path = self.path.split("?", 1)[0]
+        if not path.startswith("/chat/queue/"):
+            self.send_error(404)
+            return
+        if not self._require_auth():
+            return
+        self._delete_queued_message(path.removeprefix("/chat/queue/"))
 
     def _handle_login(self):
         length = int(self.headers.get("Content-Length", 0))
@@ -1925,14 +1997,46 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def _serve_html(self):
+        path = os.path.join(self.static_dir, "chat.html")
+        try:
+            with open(path, "r", encoding="utf-8") as source:
+                html = source.read()
+        except OSError:
+            self.send_error(500)
+            return
         html = (
-            CHAT_HTML
+            html
             .replace("__CHAT_MAX_IMAGES__", str(CHAT_MAX_IMAGES_PER_MESSAGE))
             .replace("__CHAT_MAX_MEDIA_BYTES__", str(CHAT_MAX_MEDIA_BYTES))
+            .replace("__CHAT_TAKEOVER_SECONDS__", str(CHAT_TAKEOVER_SECONDS))
+            .replace("__CHAT_ASSET_VERSION__", self.asset_version)
         )
         data = html.encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _serve_static(self, path: str):
+        filenames = {
+            "/static/chat.css": ("chat.css", "text/css; charset=utf-8"),
+            "/static/chat.mjs": ("chat.mjs", "text/javascript; charset=utf-8"),
+            "/static/chat_model.mjs": ("chat_model.mjs", "text/javascript; charset=utf-8"),
+        }
+        filename, content_type = filenames[path]
+        try:
+            with open(os.path.join(self.static_dir, filename), "rb") as source:
+                data = source.read()
+        except OSError:
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "private, max-age=31536000, immutable")
+        self.send_header("ETag", f'"{self.asset_version}"')
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -1945,33 +2049,36 @@ class ChatHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _read_json(self) -> dict | None:
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            self._send_json({"error": "Invalid Content-Length"}, 400)
+            return None
+        if length <= 0:
+            self._send_json({"error": "Empty request"}, 400)
+            return None
+        if length > CHAT_MAX_REQUEST_BYTES:
+            self.close_connection = True
+            self._send_json({"error": "Request is too large."}, 413)
+            return None
+        try:
+            body = json.loads(self.rfile.read(length))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self._send_json({"error": "Invalid JSON"}, 400)
+            return None
+        if not isinstance(body, dict):
+            self._send_json({"error": "Request body must be a JSON object"}, 400)
+            return None
+        return body
+
     def _get_media(self):
         media_id = self.path.removeprefix("/chat/media/").split("?", 1)[0]
         if len(media_id) != 64 or any(c not in "0123456789abcdef" for c in media_id):
             self.send_error(404)
             return
 
-        orch = ChatHandler.orchestrator
-        found = None
-        with orch.ctx_lock:
-            for msg in reversed(orch.ctx.messages):
-                found = media_data_from_message(msg, media_id)
-                if found:
-                    break
-        if not found:
-            # The message may still be queued while the main loop is busy.
-            with orch.chat_queue_lock:
-                queued = list(orch.chat_queue)
-            for entry in reversed(queued):
-                if not isinstance(entry, dict):
-                    continue
-                queued_msg = {
-                    "content": entry.get("content", []),
-                    "_chat_images": entry.get("chat_images", []),
-                }
-                found = media_data_from_message(queued_msg, media_id)
-                if found:
-                    break
+        found = ChatHandler.orchestrator._find_chat_media(media_id)
         if not found:
             self.send_error(404)
             return
@@ -1987,41 +2094,24 @@ class ChatHandler(BaseHTTPRequestHandler):
 
     def _get_messages(self):
         orch = ChatHandler.orchestrator
-        with orch.ctx_lock:
-            msgs = list(orch.ctx.messages)  # raw messages with _ts, no timestamp injection
-        # Include queued messages that haven't been drained to context yet,
-        # but skip any that already appear in ctx (dedupe by content)
-        ctx_user_contents = set()
-        for m in msgs:
-            if m.get("role") == "user":
-                c = m.get("content", "")
-                if isinstance(c, str) and c.strip():
-                    ctx_user_contents.add(c.strip())
-        with orch.chat_queue_lock:
-            for qm in orch.chat_queue:
-                if isinstance(qm, dict):
-                    msgs.append({
-                        "role": "user",
-                        "content": qm.get("content", ""),
-                        "_chat_images": qm.get("chat_images", []),
-                        "_ts": time.time(),
-                    })
-                elif qm.strip() not in ctx_user_contents:
-                    msgs.append({"role": "user", "content": qm, "_ts": time.time()})
-
-        filtered = []
+        msgs, queued = orch._snapshot_chat_sources()
+        context_bubbles = []
         for m in msgs:
             role = m.get("role")
             content = m.get("content", "")
             ts = m.get("_ts")
-            ts_str = time.strftime("%-I:%M%p %a", time.localtime(ts)).lower().lstrip("0") if ts else ""
+            ts_str = orch._chat_time(ts)
+            chat_id = m.get("_chat_id")
+            if not chat_id:
+                continue
             if role == "user":
                 if isinstance(content, list):
-                    text = " ".join(
+                    model_text = "\n".join(
                         p.get("text", "")
                         for p in content
                         if isinstance(p, dict) and p.get("type") == "text"
                     ).strip()
+                    text = str(m.get("_chat_original_text", model_text))
                     images = [
                         {
                             "url": f"/chat/media/{a['id']}",
@@ -2032,70 +2122,65 @@ class ChatHandler(BaseHTTPRequestHandler):
                         if isinstance(a, dict) and a.get("id")
                     ]
                     if text or images:
-                        filtered.append({
+                        context_bubbles.append({
+                            "id": f"{chat_id}:user",
                             "role": role,
                             "content": text,
                             "images": images,
                             "time": ts_str,
+                            "queued": False,
                         })
                 else:
                     if not content or not content.strip():
                         continue
-                    display_content = m.get("_chat_original_text", content)
+                    display_content = str(m.get("_chat_original_text", content))
+                    if not display_content.strip():
+                        continue
                     if any(display_content.startswith(p) for p in NUDGE_PREFIXES):
                         continue
-                    filtered.append({
+                    context_bubbles.append({
+                        "id": f"{chat_id}:user",
                         "role": role,
                         "content": display_content,
                         "time": ts_str,
+                        "images": [],
+                        "queued": False,
                     })
             elif role == "assistant":
                 # Show display updates and chat messages
-                for tc in m.get("tool_calls", []):
+                for tool_index, tc in enumerate(m.get("tool_calls", [])):
                     fn_name = tc.get("function", {}).get("name")
                     if fn_name in ("update_display", "send_chat_message"):
                         try:
                             args = json.loads(tc["function"]["arguments"])
                             msg_text = args.get("text", "")
                             if msg_text.strip():
-                                filtered.append({"role": "assistant", "content": msg_text, "time": ts_str})
+                                context_bubbles.append({
+                                    "id": f"{chat_id}:assistant:{tool_index}",
+                                    "role": "assistant",
+                                    "content": msg_text,
+                                    "images": [],
+                                    "time": ts_str,
+                                    "queued": False,
+                                })
                         except (json.JSONDecodeError, KeyError):
                             pass
 
-        # Return last 50 messages
-        filtered = filtered[-50:]
-        with orch.status_lock:
-            status = orch.status_message
-        self._send_json({"messages": filtered, "status": status})
+        # Server contract: context bubbles always precede queue bubbles,
+        # regardless of timestamp. Never sort this combined list by time.
+        queue_bubbles = [orch._queue_bubble(entry) for entry in queued]
+        filtered = (context_bubbles + queue_bubbles)[-50:]
+        ui_snapshot = orch.ui_state.snapshot()
+        self._send_json({
+            "messages": filtered,
+            "agent": ui_snapshot["agent"],
+            "server_id": ui_snapshot["server_id"],
+            "chat_revision": ui_snapshot["chat_revision"],
+        })
 
     def _post_message(self):
-        try:
-            length = int(self.headers.get("Content-Length", 0))
-        except ValueError:
-            self._send_json({"error": "Invalid Content-Length"}, 400)
-            return
-        if length <= 0:
-            self._send_json({"error": "Empty request"}, 400)
-            return
-        if length > CHAT_MAX_REQUEST_BYTES:
-            self.close_connection = True
-            self._send_json(
-                {
-                    "error": (
-                        f"Upload is too large. The attachment limit is "
-                        f"{CHAT_MAX_MEDIA_BYTES // (1024 * 1024)} MB."
-                    )
-                },
-                413,
-            )
-            return
-        try:
-            body = json.loads(self.rfile.read(length))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            self._send_json({"error": "Invalid JSON"}, 400)
-            return
-        if not isinstance(body, dict):
-            self._send_json({"error": "Request body must be a JSON object"}, 400)
+        body = self._read_json()
+        if body is None:
             return
         raw_message = body.get("message", "")
         if not isinstance(raw_message, str):
@@ -2112,43 +2197,125 @@ class ChatHandler(BaseHTTPRequestHandler):
             return
 
         orch = ChatHandler.orchestrator
-
-        approval_notice = None
-        if (
-            NOTIFICATION_APPROVAL_MODE == "legacy"
-            and orch.notification_store.has_pending_proposal()
-        ):
-            rejection_keywords = ["no", "nah", "don't", "stop", "cancel", "never", "quit", "not that"]
-            affirmation_keywords = ["yes", "yeah", "yep", "yup", "sure", "ok", "okay", "sounds good", "go for it", "do it", "approve"]
-            msg_lower = message.lower()
-            if any(kw in msg_lower for kw in rejection_keywords):
-                rejected = orch.notification_store.reject_pending()
-                if rejected:
-                    info(f"[NOTIF] Proposal rejected via chat: {rejected['id']}")
-            elif not ENABLE_DISPLAY and any(kw in msg_lower for kw in affirmation_keywords):
-                # No buttons in chat-only mode — an affirmative chat reply approves.
-                approved = orch.notification_store.approve_pending()
-                if approved:
-                    info(f"[NOTIF] Proposal approved via chat: {approved['id']}")
-                    approval_notice = f'The user approved your notification: "{approved["message"]}"'
-
+        entry = {
+            "id": f"q_{uuid.uuid4().hex}",
+            "created_at": time.time(),
+            "text": message,
+            "content": content,
+            "chat_images": chat_images,
+        }
         with orch.chat_queue_lock:
-            if approval_notice:
-                orch.chat_queue.append(approval_notice)
-            if chat_images:
-                orch.chat_queue.append({
-                    "content": content,
-                    "chat_images": chat_images,
-                })
-            else:
-                orch.chat_queue.append(content)
+            orch.chat_queue.append(entry)
+            orch.chat_event.set()
         orch.last_chat_message_time = time.time()
-        orch.chat_event.set()
         orch.presence.touch()
+        orch.ui_state.chat_changed()
         media_log = f", {len(chat_images)} attachment(s)" if chat_images else ""
         info(f"[CHAT] User message: {message[:100] or '[media only]'}{media_log}")
 
-        self._send_json({"status": "ok"})
+        self._send_json({
+            "status": "ok",
+            "id": entry["id"],
+            "message": orch._queue_bubble(entry),
+        })
+
+    @staticmethod
+    def _valid_queue_id(queue_id: str) -> bool:
+        return (
+            len(queue_id) == 34
+            and queue_id.startswith("q_")
+            and all(char in "0123456789abcdef" for char in queue_id[2:])
+        )
+
+    def _delete_queued_message(self, queue_id: str):
+        if not self._valid_queue_id(queue_id):
+            self.send_error(404)
+            return
+        restored = ChatHandler.orchestrator._undo_queued_message(queue_id)
+        if restored is None:
+            self._send_json(
+                {"error": "That message was already sent and cannot be undone."},
+                409,
+            )
+            return
+        self._send_json({"status": "ok", "restored": restored})
+
+    def _patch_queued_message(self, queue_id: str):
+        if not self._valid_queue_id(queue_id):
+            self.send_error(404)
+            return
+        body = self._read_json()
+        if body is None:
+            return
+        message = body.get("message")
+        if not isinstance(message, str):
+            self._send_json({"error": "message must be a string"}, 400)
+            return
+        try:
+            updated = ChatHandler.orchestrator._edit_queued_message(
+                queue_id, message
+            )
+        except ChatMediaError as error:
+            self._send_json({"error": str(error)}, error.status_code)
+            return
+        if updated is None:
+            self._send_json(
+                {"error": "That message was already sent and cannot be edited."},
+                409,
+            )
+            return
+        self._send_json({"status": "ok", "message": updated})
+
+    def _serve_events(self):
+        orch = ChatHandler.orchestrator
+        if not orch.sse_slots.acquire(blocking=False):
+            self._send_json({"error": "Too many event streams."}, 503)
+            return
+
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(b"retry: 2000\n\n")
+
+            snapshot = orch.ui_state.snapshot()
+            revision = snapshot["event_revision"]
+            last_change = time.monotonic()
+
+            def write_snapshot(value):
+                payload = json.dumps({
+                    "agent": value["agent"],
+                    "server_id": value["server_id"],
+                    "chat_revision": value["chat_revision"],
+                }, separators=(",", ":")).encode()
+                self.wfile.write(b"event: snapshot\n")
+                self.wfile.write(b"data: " + payload + b"\n\n")
+                self.wfile.flush()
+
+            write_snapshot(snapshot)
+            while orch.running:
+                idle_remaining = CHAT_SSE_IDLE_SECONDS - (
+                    time.monotonic() - last_change
+                )
+                if idle_remaining <= 0:
+                    break
+                timeout = min(CHAT_SSE_HEARTBEAT_SECONDS, idle_remaining)
+                snapshot, changed = orch.ui_state.wait_after(revision, timeout)
+                if changed:
+                    revision = snapshot["event_revision"]
+                    last_change = time.monotonic()
+                    write_snapshot(snapshot)
+                else:
+                    self.wfile.write(b": heartbeat\n\n")
+                    self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            self.close_connection = True
+            orch.sse_slots.release()
 
 
 def main():

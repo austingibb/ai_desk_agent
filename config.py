@@ -110,6 +110,12 @@ CHAT_MAX_REQUEST_BYTES = int(
         str((CHAT_MAX_MEDIA_BYTES * 4 // 3) + (2 * 1024 * 1024)),
     )
 )
+CHAT_TAKEOVER_SECONDS = int(os.environ.get("CHAT_TAKEOVER_SECONDS", "15"))
+CHAT_SSE_MAX_STREAMS = int(os.environ.get("CHAT_SSE_MAX_STREAMS", "8"))
+CHAT_SSE_HEARTBEAT_SECONDS = int(
+    os.environ.get("CHAT_SSE_HEARTBEAT_SECONDS", "15")
+)
+CHAT_SSE_IDLE_SECONDS = int(os.environ.get("CHAT_SSE_IDLE_SECONDS", "300"))
 
 # Notifications
 REVIEW_INTERVAL = int(os.environ.get("REVIEW_INTERVAL", "1800"))  # 30 minutes

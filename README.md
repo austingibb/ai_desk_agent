@@ -132,7 +132,7 @@ The camera is an IMX708 capturing at full 2304x1296 sensor FOV, downscaled to 64
 
 **Voice** — When TTS is enabled, display messages are spoken aloud through Piper. Non-blocking with interrupt support (new speech cuts off old speech).
 
-**Notifications** — The AI can propose recurring reminders (stretch breaks, "it's getting late"). In the default `smart` approval mode, the agent interprets natural chat responses and explicitly resolves the proposal; physical button presses still approve when the display hardware is enabled. Set `NOTIFICATION_APPROVAL_MODE=legacy` to restore fixed keyword matching in chat-only mode. A scoring system tracks what the user engages with.
+**Notifications** — The AI can propose recurring reminders (stretch breaks, "it's getting late"). In the default `smart` approval mode, the agent interprets natural chat responses and explicitly resolves the proposal; physical button presses still approve when the display hardware is enabled. In `legacy` mode, only the physical button resolves a proposal. A scoring system tracks what the user engages with.
 
 ## Context and memory
 
@@ -205,15 +205,25 @@ All configuration is via environment variables or a `.env` file. Key settings:
 | `CAMERA_BACKEND` | `auto` | Auto-select `picamera2` on Pi or OpenCV on macOS |
 | `CAMERA_DEVICE_INDEX` | `0` | OpenCV webcam index |
 | `ENABLE_DISPLAY` | `1` | Disable the e-ink display + GPIO buttons with `0` (chat-only mode) |
-| `NOTIFICATION_APPROVAL_MODE` | `smart` | `smart` lets the agent interpret chat approval/rejection; `legacy` uses fixed keywords |
+| `NOTIFICATION_APPROVAL_MODE` | `smart` | `smart` lets the agent interpret chat approval/rejection; `legacy` is physical-button-only |
 | `ENABLE_CAMERA` | `1` | Disable camera/vision with `0` |
 | `ENABLE_TTS` | `0` | Enable Piper TTS with `1` |
 | `CHAT_PASSWORD` | `admin` | Web chat login password |
 | `CHAT_USE_HTTPS` | `0` | Enable HTTPS with `1` |
 | `CHAT_MAX_IMAGES_PER_MESSAGE` | `4` | Maximum image/GIF attachments in one chat message |
 | `CHAT_MAX_MEDIA_BYTES` | `20971520` | Maximum decoded attachment bytes per message (20 MB total) |
+| `CHAT_TAKEOVER_SECONDS` | `15` | Duration of transient chat notices |
+| `CHAT_SSE_MAX_STREAMS` | `8` | Maximum concurrent chat event streams |
+| `CHAT_SSE_HEARTBEAT_SECONDS` | `15` | Seconds between event-stream heartbeat comments |
+| `CHAT_SSE_IDLE_SECONDS` | `300` | Close an event stream after this many seconds without a state or transcript change |
 | `VISION_POLL_INTERVAL` | `180` | Seconds between background photo captures |
 | `COMPACT_AFTER_N_MESSAGES` | `150` | Message count before compaction triggers |
+
+## Contributor note: adding tools
+
+Any commit that adds an agent tool must add its plain-English mode-indicator label
+to `TOOL_LABELS` in `main.py` in the same commit. Unmapped tools deliberately show
+their exact raw name in the UI so missing labels remain visible.
 
 ## Deployment
 

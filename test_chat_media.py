@@ -15,7 +15,14 @@ except ModuleNotFoundError:
     dotenv_stub.load_dotenv = lambda *args, **kwargs: None
     sys.modules["dotenv"] = dotenv_stub
 
-from chat_media import ChatMediaError, build_chat_message, media_data_from_message
+from chat_media import (
+    ChatMediaError,
+    build_chat_message,
+    media_data_from_message,
+    merge_queued_messages,
+    queued_message_payload,
+    update_queued_text,
+)
 import context as context_module
 from context import Context
 
@@ -25,6 +32,16 @@ def data_url(mime: str, raw: bytes) -> str:
 
 
 class ChatMediaTests(unittest.TestCase):
+    def _queued(self, queue_id, text, images):
+        content, attachments = build_chat_message(text, images)
+        return {
+            "id": queue_id,
+            "created_at": 1.0,
+            "text": text,
+            "content": content,
+            "chat_images": attachments,
+        }
+
     def test_text_only_stays_a_string(self):
         content, attachments = build_chat_message("hello", [])
         self.assertEqual(content, "hello")
@@ -128,6 +145,86 @@ class ChatMediaTests(unittest.TestCase):
         self.assertNotIn("base64", saved_text)
         self.assertNotIn(base64.b64encode(raw).decode(), saved_text)
         self.assertIn("small looping celebration", saved[0]["content"])
+
+    def test_queue_merge_keeps_newest_images_and_reindexes(self):
+        raws = [b"GIF89a" + bytes([index]) * 12 for index in range(6)]
+        entries = [
+            self._queued(
+                "q_1",
+                "first",
+                [{
+                    "name": f"{index}.gif",
+                    "type": "image/gif",
+                    "data_url": data_url("image/gif", raws[index]),
+                } for index in range(3)],
+            ),
+            self._queued(
+                "q_2",
+                "correction",
+                [{
+                    "name": f"{index}.gif",
+                    "type": "image/gif",
+                    "data_url": data_url("image/gif", raws[index]),
+                } for index in range(3, 6)],
+            ),
+        ]
+
+        content, attachments, visible, dropped = merge_queued_messages(
+            entries, max_images=4, max_media_bytes=10_000
+        )
+
+        self.assertEqual(dropped, 2)
+        self.assertEqual([a["name"] for a in attachments], ["2.gif", "3.gif", "4.gif", "5.gif"])
+        self.assertEqual([a["content_index"] for a in attachments], [1, 2, 3, 4])
+        self.assertEqual(content[0]["type"], "text")
+        self.assertIn("first\ncorrection", content[0]["text"])
+        self.assertIn("2 images were dropped", visible)
+
+    def test_queue_merge_byte_limit_and_singular_note(self):
+        raw_old = b"GIF89a" + b"a" * 30
+        raw_new = b"GIF89a" + b"b" * 12
+        entries = [
+            self._queued("q_1", "old", [{
+                "name": "old.gif", "type": "image/gif",
+                "data_url": data_url("image/gif", raw_old),
+            }]),
+            self._queued("q_2", "new", [{
+                "name": "new.gif", "type": "image/gif",
+                "data_url": data_url("image/gif", raw_new),
+            }]),
+        ]
+
+        _, attachments, visible, dropped = merge_queued_messages(
+            entries, max_images=4, max_media_bytes=len(raw_new)
+        )
+
+        self.assertEqual(dropped, 1)
+        self.assertEqual([a["name"] for a in attachments], ["new.gif"])
+        self.assertIn("1 image was dropped", visible)
+
+    def test_undo_payload_contains_original_text_and_data_urls(self):
+        raw = b"GIF89a" + b"x" * 12
+        entry = self._queued("q_1", "typo", [{
+            "name": "undo.gif", "type": "image/gif",
+            "data_url": data_url("image/gif", raw),
+        }])
+        payload = queued_message_payload(entry)
+        self.assertEqual(payload["text"], "typo")
+        self.assertEqual(payload["images"][0]["data_url"], data_url("image/gif", raw))
+
+    def test_empty_text_edit_requires_attachments(self):
+        entry = self._queued("q_1", "hello", [])
+        with self.assertRaisesRegex(ChatMediaError, "Use Undo send instead"):
+            update_queued_text(entry, "")
+
+        raw = b"GIF89a" + b"x" * 12
+        media_entry = self._queued("q_2", "hello", [{
+            "name": "keep.gif", "type": "image/gif",
+            "data_url": data_url("image/gif", raw),
+        }])
+        update_queued_text(media_entry, "")
+        self.assertEqual(media_entry["text"], "")
+        self.assertIn("The user shared", media_entry["content"][0]["text"])
 
 
 if __name__ == "__main__":

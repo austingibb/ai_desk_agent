@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>AI Friend Chat</title>
+  <link rel="stylesheet" href="/static/chat.css?v=__CHAT_ASSET_VERSION__">
+  <script type="importmap">
+    {"imports":{"chat-model":"/static/chat_model.mjs?v=__CHAT_ASSET_VERSION__"}}
+  </script>
+</head>
+<body>
+  <header id="agent-bar">
+    <strong class="chat-title">AI Friend</strong>
+    <span id="agent-mode" class="offline">offline</span>
+  </header>
+  <div id="status-banner" role="status" aria-live="polite">
+    <svg class="takeover-ring" viewBox="0 0 20 20" aria-hidden="true">
+      <circle class="ring-track" cx="10" cy="10" r="8"></circle>
+      <circle class="ring-progress" cx="10" cy="10" r="8"></circle>
+    </svg>
+    <span id="takeover-text"></span>
+  </div>
+  <main id="messages" aria-live="polite"></main>
+  <div id="context-menu" role="menu"></div>
+  <div id="composer">
+    <div id="upload-error" role="alert"></div>
+    <div id="attachments"></div>
+    <form id="form">
+      <input id="file-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+      <button id="attach" type="button" title="Attach images or GIFs" aria-label="Attach images or GIFs">+</button>
+      <input id="input" placeholder="Message" autocomplete="off">
+      <button id="send" type="submit" title="Send" aria-label="Send">↑</button>
+    </form>
+  </div>
+  <script id="chat-config" type="application/json">
+    {"maxImages":__CHAT_MAX_IMAGES__,"maxMediaBytes":__CHAT_MAX_MEDIA_BYTES__,"takeoverSeconds":__CHAT_TAKEOVER_SECONDS__}
+  </script>
+  <script type="module" src="/static/chat.mjs?v=__CHAT_ASSET_VERSION__"></script>
+</body>
+</html>

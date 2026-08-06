@@ -2,6 +2,7 @@
 
 import base64
 import binascii
+import copy
 import hashlib
 import re
 
@@ -44,6 +45,32 @@ def _has_valid_signature(mime: str, data: bytes) -> bool:
     if mime == "image/webp":
         return len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP"
     return False
+
+
+def _attachment_fallback_text(attachments: list) -> str:
+    gifs = sum(1 for a in attachments if a.get("type") == "image/gif")
+    stills = len(attachments) - gifs
+    labels = []
+    if stills:
+        labels.append(f"{stills} image{'s' if stills != 1 else ''}")
+    if gifs:
+        labels.append(f"{gifs} animated GIF{'s' if gifs != 1 else ''}")
+    return f"The user shared {' and '.join(labels)}. Respond to what they shared."
+
+
+def chat_content_text(content) -> str:
+    """Return the model-facing text from string or multipart chat content."""
+    if isinstance(content, str):
+        return content.strip()
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(
+        str(part.get("text", "")).strip()
+        for part in content
+        if isinstance(part, dict)
+        and part.get("type") == "text"
+        and str(part.get("text", "")).strip()
+    )
 
 
 def build_chat_message(message: str, images) -> tuple[str | list, list]:
@@ -134,17 +161,143 @@ def build_chat_message(message: str, images) -> tuple[str | list, list]:
         )
 
     if not message:
-        gifs = sum(1 for a in attachments if a["type"] == "image/gif")
-        stills = len(attachments) - gifs
-        labels = []
-        if stills:
-            labels.append(f"{stills} image{'s' if stills != 1 else ''}")
-        if gifs:
-            labels.append(f"{gifs} animated GIF{'s' if gifs != 1 else ''}")
-        message = f"The user shared {' and '.join(labels)}. Respond to what they shared."
+        message = _attachment_fallback_text(attachments)
 
     content.insert(0, {"type": "text", "text": message})
     return content, attachments
+
+
+def update_queued_text(entry: dict, message: str) -> None:
+    """Update only the editable text of a validated queue record in place."""
+    message = (message or "").strip()
+    attachments = entry.get("chat_images", [])
+    if not message and not attachments:
+        raise ChatMediaError(
+            "A message without attachments cannot be empty. Use Undo send instead."
+        )
+
+    entry["text"] = message
+    model_text = message or _attachment_fallback_text(attachments)
+    content = entry.get("content", "")
+    if isinstance(content, list):
+        updated = copy.deepcopy(content)
+        for part in updated:
+            if isinstance(part, dict) and part.get("type") == "text":
+                part["text"] = model_text
+                break
+        else:
+            updated.insert(0, {"type": "text", "text": model_text})
+        entry["content"] = updated
+    else:
+        entry["content"] = model_text
+
+
+def _attachment_data_url(entry: dict, attachment: dict) -> str | None:
+    content = entry.get("content", [])
+    index = attachment.get("content_index")
+    if not isinstance(content, list) or not isinstance(index, int):
+        return None
+    if not (0 <= index < len(content)):
+        return None
+    try:
+        value = content[index]["image_url"]["url"]
+    except (KeyError, TypeError):
+        return None
+    return value if isinstance(value, str) and _DATA_URI_RE.fullmatch(value) else None
+
+
+def queued_message_payload(entry: dict) -> dict:
+    """Return the one-round-trip composer payload for Undo."""
+    images = []
+    for attachment in entry.get("chat_images", []):
+        if not isinstance(attachment, dict):
+            continue
+        data_url = _attachment_data_url(entry, attachment)
+        if not data_url:
+            continue
+        images.append({
+            "name": attachment.get("name", "image"),
+            "type": attachment.get("type", ""),
+            "data_url": data_url,
+        })
+    return {"text": str(entry.get("text", "")), "images": images}
+
+
+def _attachment_size(entry: dict, attachment: dict) -> int:
+    size = attachment.get("size")
+    if isinstance(size, int) and size >= 0:
+        return size
+    data_url = _attachment_data_url(entry, attachment)
+    match = _DATA_URI_RE.fullmatch(data_url or "")
+    if not match:
+        return 0
+    try:
+        return len(base64.b64decode(match.group(2), validate=True))
+    except (binascii.Error, ValueError):
+        return 0
+
+
+def merge_queued_messages(
+    entries: list[dict],
+    max_images: int = CHAT_MAX_IMAGES_PER_MESSAGE,
+    max_media_bytes: int = CHAT_MAX_MEDIA_BYTES,
+) -> tuple[str | list, list, str, int]:
+    """Merge queued records, keeping the newest attachments within the limits.
+
+    Returns ``(model_content, chat_images, visible_text, dropped_count)``.
+    """
+    model_texts = []
+    visible_texts = []
+    media = []
+
+    for entry in entries:
+        model_text = chat_content_text(entry.get("content", ""))
+        if model_text:
+            model_texts.append(model_text)
+        visible_text = str(entry.get("text", "")).strip()
+        if visible_text:
+            visible_texts.append(visible_text)
+        for attachment in entry.get("chat_images", []):
+            if not isinstance(attachment, dict):
+                continue
+            data_url = _attachment_data_url(entry, attachment)
+            if not data_url:
+                continue
+            media.append({
+                "part": {"type": "image_url", "image_url": {"url": data_url}},
+                "attachment": copy.deepcopy(attachment),
+                "size": _attachment_size(entry, attachment),
+            })
+
+    dropped = 0
+    total_bytes = sum(item["size"] for item in media)
+    while media and (len(media) > max_images or total_bytes > max_media_bytes):
+        removed = media.pop(0)
+        total_bytes -= removed["size"]
+        dropped += 1
+
+    model_text = "\n".join(model_texts)
+    visible_text = "\n".join(visible_texts)
+    if dropped:
+        noun = "image was" if dropped == 1 else "images were"
+        note = (
+            f"[{dropped} {noun} dropped because queued messages were merged "
+            "and exceeded the per-message attachment limits.]"
+        )
+        model_text = "\n".join(part for part in (model_text, note) if part)
+        visible_text = "\n".join(part for part in (visible_text, note) if part)
+
+    attachments = []
+    parts = [{"type": "text", "text": model_text}]
+    for index, item in enumerate(media, start=1):
+        attachment = item["attachment"]
+        attachment["content_index"] = index
+        attachment["size"] = item["size"]
+        attachments.append(attachment)
+        parts.append(item["part"])
+
+    content = parts if attachments else model_text
+    return content, attachments, visible_text, dropped
 
 
 def media_data_from_message(msg: dict, media_id: str) -> tuple[str, bytes] | None:
