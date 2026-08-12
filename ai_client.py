@@ -1,5 +1,6 @@
-"""LLM API clients — MiniMax M3 on OpenRouter (brain) + local Gemma (vision)."""
+"""LLM API clients — hosted OpenRouter brain + local vision model."""
 
+import copy
 import importlib
 import json
 import re
@@ -69,8 +70,28 @@ def _clean(text: str) -> str:
     return _TOKEN_JUNK_RE.sub("", text).strip()
 
 
+# AARG's canonical perception schema sets additionalProperties=False, so without
+# a field of its own everything update_vision_requests asks for is generated and
+# then discarded. This is that field. It stays out of aarg_mlx/scene.py on
+# purpose: the four canonical fields are enums built for frame-to-frame
+# comparison (scene.diff_observations depends on that), while this one is
+# free text the agent rewords constantly.
+AARG_REQUEST_FIELD = "requested_observations"
+AARG_REQUEST_STATUSES = ("present", "none", "unclear")
+AARG_REQUEST_MAX_CHARS = 400
+
+AARG_REQUEST_PREAMBLE = (
+    "\n\nAdditional observation request. Answer it only in the "
+    f"`{AARG_REQUEST_FIELD}` field; the four other fields keep the meaning and "
+    'rules given above. Use status "present" when you can answer from this '
+    'frame, "none" when the request does not apply to it, and "unclear" when '
+    "the frame cannot support an answer. Report only what is visible, and keep "
+    f"the description under {AARG_REQUEST_MAX_CHARS} characters.\n"
+)
+
+
 class AIClient:
-    """Brain LLM — MiniMax M3 on OpenRouter for multimodal reasoning and tools."""
+    """Hosted brain LLM for reasoning and tool use."""
 
     def __init__(self):
         self.base_url = LLM_BASE_URL.rstrip("/")
@@ -353,6 +374,9 @@ class VisionClient:
         self.request_history = request_history
         self.description_log = description_log
         self.last_request_commit = ""
+        # Mode the stored requests were written for, when it isn't this
+        # provider's. Empty means they applied normally.
+        self.requests_stale = ""
         self._inference_lock = threading.Lock()
         self._aarg_scene = None
         self._headers = {}
@@ -432,12 +456,18 @@ class VisionClient:
             except FileNotFoundError:
                 requests_content = ""
         extra_prompt = requests_content.strip()
+        answer_tokens = VISION_MAX_TOKENS
         if extra_prompt:
             content = payload["messages"][0]["content"]
             for part in reversed(content):
                 if part.get("type") == "text":
-                    part["text"] += "\n\nAdditional observation request:\n" + extra_prompt
+                    part["text"] += AARG_REQUEST_PREAMBLE + extra_prompt
                     break
+            if self._add_requested_observations(payload):
+                # The extra field has to fit alongside the canonical answer or
+                # the whole response truncates into unparseable JSON.
+                answer_tokens += AARG_REQUEST_MAX_CHARS // 3
+        payload["max_tokens"] = answer_tokens
 
         if VISION_ENABLE_THINKING:
             payload.update({
@@ -446,9 +476,41 @@ class VisionClient:
                 "thinking_start_token": "<|think|>",
                 "thinking_end_token": "<channel|>",
                 # Reserve the normal structured answer budget after thinking.
-                "max_tokens": VISION_THINKING_BUDGET + VISION_MAX_TOKENS,
+                "max_tokens": VISION_THINKING_BUDGET + answer_tokens,
             })
         return payload
+
+    @staticmethod
+    def _add_requested_observations(payload: dict) -> bool:
+        """Add the custom-request field to this payload's copy of the schema.
+
+        build_perception_payload() hands back the module-level PERCEPTION_SCHEMA
+        by reference, so the deep copy is required, not hygiene: editing in place
+        would change the schema for every other importer of scene.py in the
+        process, including its CLI and eval paths.
+        """
+        try:
+            json_schema = payload["response_format"]["json_schema"]
+            schema = copy.deepcopy(json_schema["schema"])
+            properties = schema["properties"]
+        except (KeyError, TypeError):
+            info("[VISION] AARG payload exposes no schema; sending request as text only")
+            return False
+
+        properties[AARG_REQUEST_FIELD] = {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["status", "description"],
+            "properties": {
+                "status": {"type": "string", "enum": list(AARG_REQUEST_STATUSES)},
+                "description": {"type": "string", "maxLength": AARG_REQUEST_MAX_CHARS},
+            },
+        }
+        required = schema.setdefault("required", [])
+        if AARG_REQUEST_FIELD not in required:
+            required.append(AARG_REQUEST_FIELD)
+        json_schema["schema"] = schema
+        return True
 
     @staticmethod
     def _message_text(data: dict) -> str:
@@ -489,11 +551,34 @@ class VisionClient:
                 perception, _ = decoder.raw_decode(candidate.lstrip())
                 if not isinstance(perception, dict):
                     continue
+                # Tolerates extra keys: it only checks for missing ones.
                 self._aarg_scene.validate_perception(perception)
+                self._check_requested_observations(perception)
                 return perception
             except (json.JSONDecodeError, ValueError, TypeError, RuntimeError) as exc:
                 last_error = exc
         raise ValueError(f"AARG vision returned no valid perception: {text[:500]}") from last_error
+
+    @staticmethod
+    def _check_requested_observations(perception: dict):
+        """Validate the one field scene.validate_perception doesn't know about.
+
+        Drops it instead of raising. A malformed custom field should not cost the
+        frame its four canonical fields, which is what a raise here would do:
+        _parse_aarg_perception would move on to the next candidate and most
+        likely fail the whole description.
+        """
+        value = perception.get(AARG_REQUEST_FIELD)
+        if value is None:
+            return
+        valid = (
+            isinstance(value, dict)
+            and value.get("status") in AARG_REQUEST_STATUSES
+            and isinstance(value.get("description"), str)
+        )
+        if not valid:
+            info(f"[VISION] Dropping malformed {AARG_REQUEST_FIELD}: {value!r}")
+            perception.pop(AARG_REQUEST_FIELD, None)
 
     def health_check(self) -> bool:
         """Return whether the configured vision service is accepting requests."""
@@ -544,7 +629,18 @@ class VisionClient:
         requests_content = None
         request_commit = ""
         if self.request_history:
-            requests_content, request_commit = self.request_history.snapshot()
+            requests_content, request_commit, declared = (
+                self.request_history.snapshot_for(self.provider)
+            )
+            if requests_content:
+                self.requests_stale = ""
+            else:
+                self.requests_stale = declared if declared != self.provider else ""
+                if self.requests_stale:
+                    info(
+                        f"[VISION] Requests declare {declared}, provider is "
+                        f"{self.provider}; not appending them"
+                    )
         payload = (
             self._build_aarg_payload(image_data_uri, requests_content)
             if self.provider == "aarg_mlx"

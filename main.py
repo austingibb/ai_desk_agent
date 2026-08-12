@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AI E-Ink Friend — agent loop orchestrator. Runs on Pi 5 (192.168.0.39)."""
+"""AI E-Ink Friend — agent loop orchestrator."""
 
 import time
 import os
@@ -48,8 +48,11 @@ from config import (
     LLM_ESTIMATED_MAX_TOKENS,
     COMPACT_AFTER_N_MESSAGES,
     MERGE_SUMMARIES_AFTER,
+    LLM_SUPPORTS_IMAGES,
     ENABLE_CAMERA,
     ENABLE_DISPLAY,
+    VISION_PROVIDER,
+    VISION_REQUESTS_GUIDANCE,
     VISION_POLL_INTERVAL,
     MOTION_POLL_INTERVAL,
     CHILL_TIMEOUT,
@@ -842,13 +845,26 @@ class Orchestrator:
 
         captured_at = time.strftime("%-I:%M%p", time.localtime(scene["timestamp"])).lower().lstrip("0")
         age = int(time.time() - scene["timestamp"])
-        return {
+        result = {
             "status": "ok",
             "description": scene["description"],
             "captured_at": captured_at,
             "age_seconds": age,
             "vision_request_commit": scene.get("request_commit", ""),
         }
+        self._note_stale_vision_requests(result)
+        return result
+
+    def _note_stale_vision_requests(self, result: dict):
+        """Tell the agent when its stored requests were skipped as stale."""
+        stale = getattr(self.vision, "requests_stale", "")
+        if not stale:
+            return
+        result["vision_requests"] = (
+            f"Not applied. They were written for {stale} vision, but this "
+            f"machine now runs {VISION_PROVIDER}. Call update_vision_requests "
+            "to rewrite them for the current mode."
+        )
 
     def _tool_capture_photo(self) -> dict:
         """Take a photo now and block until the vision model describes it."""
@@ -857,12 +873,14 @@ class Orchestrator:
         if not scene:
             return {"status": "error", "message": "Failed to capture or describe photo — vision model may be unavailable"}
         captured_at = time.strftime("%-I:%M%p", time.localtime(scene["timestamp"])).lower().lstrip("0")
-        return {
+        result = {
             "status": "ok",
             "description": scene["description"],
             "captured_at": captured_at,
             "vision_request_commit": scene.get("request_commit", ""),
         }
+        self._note_stale_vision_requests(result)
+        return result
 
     def _tool_update_vision_requests(self, args: dict) -> dict:
         requests_text = args.get("requests", "").strip()
@@ -873,10 +891,16 @@ class Orchestrator:
             return {"status": "error", "message": "Vision request history is unavailable"}
 
         # Read current contents so the AI can see what's already there.
-        current = self.vision_request_history.read().strip()
+        declared, current = self.vision_request_history.split_mode(
+            self.vision_request_history.read()
+        )
+        stale = bool(current) and declared != VISION_PROVIDER
 
-        # First call with existing content: bounce back so the AI can merge
-        if current and not self.vision_requests_shown:
+        # First call with existing content: bounce back so the AI can merge.
+        # Requests written for another vision mode are the exception: merging
+        # into those would carry the wrong shape forward, so let the rewrite go
+        # straight through.
+        if current and not stale and not self.vision_requests_shown:
             self.vision_requests_shown = True
             info(f"[VISION] Bouncing update_vision_requests — showing existing requests first")
             return {
@@ -885,19 +909,25 @@ class Orchestrator:
                     "STOP — the vision requests file already has content. "
                     "Review the existing requests below and call update_vision_requests again "
                     "with your new requests MERGED with the existing ones. "
-                    "Don't drop existing requests unless they're truly no longer needed."
+                    "Don't drop existing requests unless they're truly no longer needed. "
+                    + VISION_REQUESTS_GUIDANCE
                 ),
                 "current_requests": current,
+                "vision_mode": VISION_PROVIDER,
             }
 
         try:
-            commit_hash = self.vision_request_history.update(requests_text)
+            commit_hash = self.vision_request_history.update(requests_text, VISION_PROVIDER)
             self.vision_requests_shown = False  # reset so next update bounces again
             info(f"[VISION] Requests updated at {commit_hash}: {requests_text[:100]}...")
             return {
                 "status": "ok",
-                "message": "Vision requests updated and committed. Changes take effect on the next photo capture.",
+                "message": (
+                    f"Vision requests updated and committed for {VISION_PROVIDER} "
+                    "vision. Changes take effect on the next photo capture."
+                ),
                 "commit_hash": commit_hash,
+                "vision_mode": VISION_PROVIDER,
             }
         except Exception as e:
             return {"status": "error", "message": f"Failed to write requests file: {e}"}
@@ -2008,6 +2038,10 @@ class ChatHandler(BaseHTTPRequestHandler):
             html
             .replace("__CHAT_MAX_IMAGES__", str(CHAT_MAX_IMAGES_PER_MESSAGE))
             .replace("__CHAT_MAX_MEDIA_BYTES__", str(CHAT_MAX_MEDIA_BYTES))
+            .replace(
+                "__LLM_SUPPORTS_IMAGES__",
+                json.dumps(LLM_SUPPORTS_IMAGES),
+            )
             .replace("__CHAT_TAKEOVER_SECONDS__", str(CHAT_TAKEOVER_SECONDS))
             .replace("__CHAT_ASSET_VERSION__", self.asset_version)
         )
@@ -2187,6 +2221,12 @@ class ChatHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "message must be a string"}, 400)
             return
         message = raw_message.strip()
+        if body.get("images") and not LLM_SUPPORTS_IMAGES:
+            self._send_json(
+                {"error": "The configured brain model does not support image uploads."},
+                400,
+            )
+            return
         try:
             content, chat_images = build_chat_message(
                 message,

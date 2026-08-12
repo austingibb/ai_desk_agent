@@ -2,6 +2,8 @@ __pycache__/
 *.pyc
 .env
 .session_token
+/cert.pem
+/key.pem
 .claude/worktrees/
 venv/
 *.zsh

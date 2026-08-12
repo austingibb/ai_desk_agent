@@ -209,7 +209,7 @@ class Context:
         for attachment in attachments:
             if not isinstance(attachment, dict):
                 continue
-            kind = "animated GIF" if attachment.get("type") == "image/gif" else "image"
+            kind = "image"
             name = str(attachment.get("name", "")).strip()
             labels.append(f"{kind} {name!r}" if name else kind)
         media_label = ", ".join(labels) if labels else "image attachment"

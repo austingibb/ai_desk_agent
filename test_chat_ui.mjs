@@ -2,11 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  CHAT_COLOR_PALETTES,
+  contrastingTextColor,
   formatAgentState,
   menuItems,
   mutationDisabled,
   nextTakeover,
   reconcilePlan,
+  resolveChatTheme,
   shouldApplyAgentSnapshot,
 } from './static/chat_model.mjs';
 
@@ -53,4 +56,39 @@ test('latest takeover replaces the prior state',()=>{
   const second=nextTakeover('second',200,15000);
   assert.equal(first.text,'first');
   assert.deepEqual(second,{text:'second',startedAt:200,expiresAt:15200});
+});
+
+test('color customizer provides 15 distinct choices for every category',()=>{
+  for(const options of Object.values(CHAT_COLOR_PALETTES)){
+    assert.equal(options.length,15);
+    assert.equal(new Set(options.map(option=>option.value)).size,15);
+  }
+  assert.ok(CHAT_COLOR_PALETTES.assistant.some(option=>
+    option.name==='DeepSeek blue'&&option.value==='#4D6BFE'
+  ));
+  assert.ok(CHAT_COLOR_PALETTES.user.some(option=>option.value==='#FACADE'));
+});
+
+test('chat colors automatically choose the higher-contrast black or white text',()=>{
+  assert.equal(contrastingTextColor('#111214'),'#FFFFFF');
+  assert.equal(contrastingTextColor('#FACADE'),'#000000');
+  assert.equal(contrastingTextColor('#4D6BFE'),'#000000');
+  assert.equal(contrastingTextColor('not-a-color'),'#FFFFFF');
+});
+
+test('saved chat themes accept palette colors and reject stale values',()=>{
+  assert.deepEqual(resolveChatTheme({
+    background:'#f1ede5',
+    assistant:'#4d6bfe',
+    user:'#facade',
+  }),{
+    background:'#F1EDE5',
+    assistant:'#4D6BFE',
+    user:'#FACADE',
+  });
+  assert.deepEqual(resolveChatTheme({assistant:'#123456'}),{
+    background:'#1C1C1E',
+    assistant:'#3A3A3C',
+    user:'#0A84FF',
+  });
 });

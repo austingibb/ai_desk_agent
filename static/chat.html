@@ -11,6 +11,20 @@
 </head>
 <body>
   <header id="agent-bar">
+    <div id="theme-customizer" aria-label="Chat colors">
+      <div class="theme-triggers" role="group" aria-label="Customize chat colors">
+        <button class="theme-trigger" type="button" data-theme-key="background"
+                aria-label="Choose trim and background color" aria-controls="color-palette"
+                aria-expanded="false" title="Trim & background color"></button>
+        <button class="theme-trigger" type="button" data-theme-key="assistant"
+                aria-label="Choose AI chat color" aria-controls="color-palette"
+                aria-expanded="false" title="AI chat color"></button>
+        <button class="theme-trigger" type="button" data-theme-key="user"
+                aria-label="Choose my chat color" aria-controls="color-palette"
+                aria-expanded="false" title="My chat color"></button>
+      </div>
+      <div id="color-palette" role="listbox" aria-hidden="true"></div>
+    </div>
     <strong class="chat-title">AI Friend</strong>
     <span id="agent-mode" class="offline">offline</span>
   </header>
@@ -27,14 +41,14 @@
     <div id="upload-error" role="alert"></div>
     <div id="attachments"></div>
     <form id="form">
-      <input id="file-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
-      <button id="attach" type="button" title="Attach images or GIFs" aria-label="Attach images or GIFs">+</button>
+      <input id="file-input" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden>
+      <button id="attach" type="button" title="Attach static images (PNG, JPEG, or WebP)" aria-label="Attach static images (PNG, JPEG, or WebP)">+</button>
       <input id="input" placeholder="Message" autocomplete="off">
       <button id="send" type="submit" title="Send" aria-label="Send">↑</button>
     </form>
   </div>
   <script id="chat-config" type="application/json">
-    {"maxImages":__CHAT_MAX_IMAGES__,"maxMediaBytes":__CHAT_MAX_MEDIA_BYTES__,"takeoverSeconds":__CHAT_TAKEOVER_SECONDS__}
+    {"maxImages":__CHAT_MAX_IMAGES__,"maxMediaBytes":__CHAT_MAX_MEDIA_BYTES__,"supportsImages":__LLM_SUPPORTS_IMAGES__,"takeoverSeconds":__CHAT_TAKEOVER_SECONDS__}
   </script>
   <script type="module" src="/static/chat.mjs?v=__CHAT_ASSET_VERSION__"></script>
 </body>

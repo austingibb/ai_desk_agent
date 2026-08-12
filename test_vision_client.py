@@ -33,6 +33,17 @@ VALID_PERCEPTION = {
 }
 
 
+# Mirrors scene.PERCEPTION_SCHEMA's shape, including the module-level identity:
+# build_perception_payload() hands this same object out by reference, which is
+# what _add_requested_observations has to deep-copy before editing.
+FAKE_PERCEPTION_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": list(VALID_PERCEPTION),
+    "properties": {field: {"type": "object"} for field in VALID_PERCEPTION},
+}
+
+
 def _fake_scene_module():
     def build_perception_payload(*, model, image_data_uri, max_tokens):
         return {
@@ -46,12 +57,23 @@ def _fake_scene_module():
             }],
             "max_tokens": max_tokens,
             "enable_thinking": False,
-            "response_format": {"type": "json_schema"},
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "scene_perception",
+                    "strict": True,
+                    "schema": FAKE_PERCEPTION_SCHEMA,
+                },
+            },
         }
 
     def validate_perception(value):
-        if set(value) != set(VALID_PERCEPTION):
-            raise ValueError("invalid perception")
+        # scene.validate_perception checks for missing fields only, so extra
+        # keys pass. The fake must match or it would reject the very field
+        # _add_requested_observations exists to add.
+        missing = set(VALID_PERCEPTION) - set(value)
+        if missing:
+            raise ValueError(f"perception is missing fields: {sorted(missing)}")
 
     return types.SimpleNamespace(
         build_perception_payload=build_perception_payload,
@@ -82,7 +104,7 @@ class VisionClientTests(unittest.TestCase):
             "timings": {"predicted_per_second": 20.0},
         })
         request_history = Mock()
-        request_history.snapshot.return_value = ("canonical requests", "b" * 40)
+        request_history.snapshot_for.return_value = ("canonical requests", "b" * 40, "aarg_mlx")
         description_log = Mock()
 
         with (
@@ -107,7 +129,8 @@ class VisionClientTests(unittest.TestCase):
         self.assertEqual(payload["thinking_budget"], 256)
         self.assertEqual(payload["thinking_start_token"], "<|think|>")
         self.assertEqual(payload["thinking_end_token"], "<channel|>")
-        self.assertEqual(payload["max_tokens"], 606)
+        # 256 thinking + 350 answer + 133 headroom for requested_observations
+        self.assertEqual(payload["max_tokens"], 739)
         self.assertEqual(json.loads(result), VALID_PERCEPTION)
         self.assertEqual(client.last_request_commit, "b" * 40)
         description_log.append.assert_called_once()
@@ -132,6 +155,103 @@ class VisionClientTests(unittest.TestCase):
             }]
         })
         self.assertEqual(parsed, VALID_PERCEPTION)
+
+    def _aarg_client(self, fake_scene):
+        with (
+            patch.object(ai_client, "VISION_PROVIDER", "aarg_mlx"),
+            patch.object(ai_client, "VISION_AARG_MLX_DIR", ""),
+            patch.object(ai_client.importlib, "import_module", return_value=fake_scene),
+        ):
+            return ai_client.VisionClient()
+
+    def test_requests_content_gets_a_schema_field_to_land_in(self):
+        client = self._aarg_client(_fake_scene_module())
+        with (
+            patch.object(ai_client, "VISION_ENABLE_THINKING", False),
+            patch.object(ai_client, "VISION_MAX_TOKENS", 350),
+        ):
+            payload = client._build_aarg_payload(
+                "data:image/jpeg;base64,AA==", "always report visible drinks"
+            )
+
+        schema = payload["response_format"]["json_schema"]["schema"]
+        field = schema["properties"]["requested_observations"]
+        self.assertIn("requested_observations", schema["required"])
+        self.assertEqual(field["properties"]["status"]["enum"], ["present", "none", "unclear"])
+        self.assertEqual(field["properties"]["description"]["maxLength"], 400)
+        self.assertEqual(payload["max_tokens"], 483)
+
+        text = payload["messages"][0]["content"][-1]["text"]
+        self.assertIn("always report visible drinks", text)
+        self.assertIn("requested_observations", text)
+
+    def test_schema_edit_does_not_mutate_the_shared_canonical_schema(self):
+        client = self._aarg_client(_fake_scene_module())
+        client._build_aarg_payload("data:image/jpeg;base64,AA==", "look for mugs")
+        self.assertNotIn("requested_observations", FAKE_PERCEPTION_SCHEMA["properties"])
+        self.assertNotIn("requested_observations", FAKE_PERCEPTION_SCHEMA["required"])
+
+    def test_empty_requests_file_leaves_the_canonical_payload_alone(self):
+        client = self._aarg_client(_fake_scene_module())
+        with (
+            patch.object(ai_client, "VISION_ENABLE_THINKING", False),
+            patch.object(ai_client, "VISION_MAX_TOKENS", 350),
+        ):
+            payload = client._build_aarg_payload("data:image/jpeg;base64,AA==", "   ")
+
+        schema = payload["response_format"]["json_schema"]["schema"]
+        self.assertNotIn("requested_observations", schema["properties"])
+        self.assertEqual(payload["max_tokens"], 350)
+        self.assertEqual(payload["messages"][0]["content"][-1]["text"], "canonical prompt")
+
+    def test_parser_keeps_a_valid_requested_observations_field(self):
+        client = self._aarg_client(_fake_scene_module())
+        perception = dict(VALID_PERCEPTION)
+        perception["requested_observations"] = {
+            "status": "present",
+            "description": "a full mug of coffee on the desk",
+        }
+        parsed = client._parse_aarg_perception({
+            "choices": [{"message": {"content": json.dumps(perception)}}]
+        })
+        self.assertEqual(parsed["requested_observations"]["status"], "present")
+
+    def test_parser_drops_a_malformed_requested_observations_field(self):
+        client = self._aarg_client(_fake_scene_module())
+        perception = dict(VALID_PERCEPTION)
+        perception["requested_observations"] = {"status": "definitely", "description": 7}
+        parsed = client._parse_aarg_perception({
+            "choices": [{"message": {"content": json.dumps(perception)}}]
+        })
+        self.assertNotIn("requested_observations", parsed)
+        self.assertEqual(parsed["people_present"], VALID_PERCEPTION["people_present"])
+
+    def test_requests_written_for_another_mode_are_not_sent(self):
+        fake_scene = _fake_scene_module()
+        response = _Response({
+            "choices": [{"message": {"content": json.dumps(VALID_PERCEPTION)}}],
+        })
+        request_history = Mock()
+        # snapshot_for withholds the body and reports the mode it was written for.
+        request_history.snapshot_for.return_value = ("", "c" * 40, "generic")
+
+        with (
+            patch.object(ai_client, "VISION_PROVIDER", "aarg_mlx"),
+            patch.object(ai_client, "VISION_AARG_MLX_DIR", ""),
+            patch.object(ai_client, "VISION_ENABLE_THINKING", False),
+            patch.object(ai_client, "VISION_MAX_TOKENS", 350),
+            patch.object(ai_client.importlib, "import_module", return_value=fake_scene),
+            patch.object(ai_client.requests, "post", return_value=response) as post,
+        ):
+            client = ai_client.VisionClient(request_history)
+            client.describe("data:image/jpeg;base64,AA==", max_retries=1)
+
+        payload = post.call_args.kwargs["json"]
+        schema = payload["response_format"]["json_schema"]["schema"]
+        self.assertEqual(payload["messages"][0]["content"][-1]["text"], "canonical prompt")
+        self.assertNotIn("requested_observations", schema["properties"])
+        self.assertEqual(payload["max_tokens"], 350)
+        self.assertEqual(client.requests_stale, "generic")
 
     def test_generic_provider_keeps_existing_text_first_payload(self):
         with patch.object(ai_client, "VISION_PROVIDER", "generic"):

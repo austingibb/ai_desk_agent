@@ -110,6 +110,11 @@ class _Orchestrator:
 
 class ChatHTTPTests(unittest.TestCase):
     def setUp(self):
+        # Most route tests exercise the optional upload path. Individual tests
+        # turn this off to cover text-only models such as the default DeepSeek.
+        self.image_support_patch = patch("main.LLM_SUPPORTS_IMAGES", True)
+        self.image_support_patch.start()
+        self.addCleanup(self.image_support_patch.stop)
         self.orch = _Orchestrator()
         ChatHandler.orchestrator = self.orch
         ChatHandler.session_token = "test-session"
@@ -140,7 +145,7 @@ class ChatHTTPTests(unittest.TestCase):
         return self.conn.getresponse()
 
     def test_upload_poll_and_authenticated_media_route(self):
-        raw = b"GIF89a" + b"\x00" * 20
+        raw = b"\x89PNG\r\n\x1a\n" + b"\x00" * 20
         encoded = base64.b64encode(raw).decode()
         response = self._request(
             "POST",
@@ -148,9 +153,9 @@ class ChatHTTPTests(unittest.TestCase):
             {
                 "message": "Look at this.",
                 "images": [{
-                    "name": "reaction.gif",
-                    "type": "image/gif",
-                    "data_url": f"data:image/gif;base64,{encoded}",
+                    "name": "reaction.png",
+                    "type": "image/png",
+                    "data_url": f"data:image/png;base64,{encoded}",
                 }],
             },
         )
@@ -170,8 +175,26 @@ class ChatHTTPTests(unittest.TestCase):
 
         response = self._request("GET", media_url)
         self.assertEqual(response.status, 200)
-        self.assertEqual(response.getheader("Content-Type"), "image/gif")
+        self.assertEqual(response.getheader("Content-Type"), "image/png")
         self.assertEqual(response.read(), raw)
+
+    def test_gif_upload_is_rejected(self):
+        raw = b"GIF89a" + b"\x00" * 20
+        response = self._request(
+            "POST",
+            "/chat",
+            {
+                "message": "Look at this.",
+                "images": [{
+                    "name": "reaction.gif",
+                    "type": "image/gif",
+                    "data_url": f"data:image/gif;base64,{base64.b64encode(raw).decode()}",
+                }],
+            },
+        )
+        self.assertEqual(response.status, 400)
+        self.assertIn("static PNG, JPEG, or WebP", json.loads(response.read())["error"])
+        self.assertEqual(self.orch.chat_queue, [])
 
     def test_homepage_query_and_rendered_javascript(self):
         response = self._request("GET", "/?")
@@ -179,7 +202,41 @@ class ChatHTTPTests(unittest.TestCase):
         html = response.read().decode()
         self.assertIn("/static/chat.mjs?v=", html)
         self.assertIn('type="importmap"', html)
+        self.assertIn('accept="image/png,image/jpeg,image/webp"', html)
+        self.assertIn("Attach static images (PNG, JPEG, or WebP)", html)
+        self.assertIn('"supportsImages":true', html)
+        self.assertNotIn("image/gif", html)
         self.assertNotIn("__CHAT_ASSET_VERSION__", html)
+        self.assertNotIn("__LLM_SUPPORTS_IMAGES__", html)
+
+    def test_text_only_model_rejects_images_and_disables_them_in_ui_config(self):
+        raw = b"\x89PNG\r\n\x1a\n" + b"\x00" * 20
+        encoded = base64.b64encode(raw).decode()
+        with patch("main.LLM_SUPPORTS_IMAGES", False):
+            response = self._request(
+                "POST",
+                "/chat",
+                {
+                    "message": "Look at this.",
+                    "images": [{
+                        "name": "reaction.png",
+                        "type": "image/png",
+                        "data_url": f"data:image/png;base64,{encoded}",
+                    }],
+                },
+            )
+            self.assertEqual(response.status, 400)
+            self.assertIn("does not support image uploads", json.loads(response.read())["error"])
+            self.assertEqual(self.orch.chat_queue, [])
+
+            response = self._request("GET", "/")
+            self.assertEqual(response.status, 200)
+            self.assertIn('"supportsImages":false', response.read().decode())
+
+            response = self._request("POST", "/chat", {"message": "Text still works."})
+            self.assertEqual(response.status, 200)
+            response.read()
+            self.assertEqual(self.orch.chat_queue[0]["content"], "Text still works.")
 
     def test_smart_approval_leaves_natural_language_decision_for_agent(self):
         notifications = _PendingNotifications()
@@ -240,14 +297,14 @@ class ChatHTTPTests(unittest.TestCase):
         self.assertEqual(repeated, first_snapshot)
 
     def test_edit_preserves_queue_position_id_and_attachments(self):
-        raw = b"GIF89a" + b"\x01" * 20
+        raw = b"\x89PNG\r\n\x1a\n" + b"\x01" * 20
         response = self._request(
             "POST", "/chat", {
                 "message": "typo",
                 "images": [{
-                    "name": "edit.gif",
-                    "type": "image/gif",
-                    "data_url": f"data:image/gif;base64,{base64.b64encode(raw).decode()}",
+                    "name": "edit.png",
+                    "type": "image/png",
+                    "data_url": f"data:image/png;base64,{base64.b64encode(raw).decode()}",
                 }],
             },
         )
@@ -282,12 +339,12 @@ class ChatHTTPTests(unittest.TestCase):
         response.read()
 
     def test_undo_returns_media_in_one_response(self):
-        raw = b"GIF89a" + b"\x02" * 20
-        data_url = f"data:image/gif;base64,{base64.b64encode(raw).decode()}"
+        raw = b"\x89PNG\r\n\x1a\n" + b"\x02" * 20
+        data_url = f"data:image/png;base64,{base64.b64encode(raw).decode()}"
         response = self._request(
             "POST", "/chat", {
                 "message": "restore",
-                "images": [{"name": "undo.gif", "type": "image/gif", "data_url": data_url}],
+                "images": [{"name": "undo.png", "type": "image/png", "data_url": data_url}],
             },
         )
         queue_id = json.loads(response.read())["id"]

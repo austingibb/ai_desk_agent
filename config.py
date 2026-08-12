@@ -10,10 +10,12 @@ load_dotenv(os.path.join(PROJECT_DIR, ".env"))
 DISPLAY_SERVER_URL = os.environ.get("DISPLAY_SERVER_URL", "http://localhost:5050")
 ENABLE_WEB_SEARCH = os.environ.get("ENABLE_WEB_SEARCH", "1") == "1"
 
-# Brain LLM — MiniMax M3 on OpenRouter
+# Hosted brain LLM on OpenRouter. Keep the media capability beside the model
+# selection so changing one prompts an explicit check of the other.
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://openrouter.ai/api/v1")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
-LLM_MODEL = os.environ.get("LLM_MODEL", "minimax/minimax-m3")
+LLM_MODEL = os.environ.get("LLM_MODEL", "deepseek/deepseek-v4-flash-0731")
+LLM_SUPPORTS_IMAGES = os.environ.get("LLM_SUPPORTS_IMAGES", "0") == "1"
 LLM_MAX_TOKENS = 2048
 LLM_MAX_TOKENS_COMPACT = int(os.environ.get("LLM_MAX_TOKENS_COMPACT", "64000"))
 LLM_TIMEOUT = 120
@@ -52,6 +54,19 @@ VISION_REQUESTS_REPO_DIR = os.environ.get(
     os.path.join(PROJECT_DIR, "requests_for_image_model"),
 )
 VISION_REQUESTS_FILE = os.path.join(VISION_REQUESTS_REPO_DIR, "requests_for_image_model.md")
+
+# What update_vision_requests should produce depends on where the answer lands:
+# one bounded field under the structured provider, the whole description under
+# the free-text one. The requests file records which of these it was written for.
+VISION_REQUESTS_GUIDANCE = (
+    "Vision mode is aarg_mlx (structured). The scene comes back as a fixed JSON "
+    "schema and your requests are answered in ONE field, capped at 400 "
+    "characters. Ask one or two specific questions rather than a checklist; "
+    "anything that doesn't fit that field is generated and then discarded."
+    if _AARG_VISION else
+    "Vision mode is generic (free text). Your requests shape the whole scene "
+    "description, so a markdown checklist of things to look for works well."
+)
 VISION_REQUESTS_LEGACY_FILE = os.path.join(PROJECT_DIR, "requests_for_image_model.md")
 VISION_DESCRIPTION_LOG_FILE = os.environ.get(
     "VISION_DESCRIPTION_LOG_FILE",
@@ -100,7 +115,7 @@ CHAT_SESSION_DAYS = 7
 CHAT_USE_HTTPS = os.environ.get("CHAT_USE_HTTPS", "0") == "1"
 SSL_CERT_FILE = os.environ.get("SSL_CERT_FILE", os.path.join(PROJECT_DIR, "cert.pem"))
 SSL_KEY_FILE = os.environ.get("SSL_KEY_FILE", os.path.join(PROJECT_DIR, "key.pem"))
-# User-posted image/GIF uploads. The byte limit is shared across all attachments
+# User-posted static image uploads. The byte limit is shared across all attachments
 # in one message; JSON/base64 overhead is accounted for separately.
 CHAT_MAX_IMAGES_PER_MESSAGE = int(os.environ.get("CHAT_MAX_IMAGES_PER_MESSAGE", "4"))
 CHAT_MAX_MEDIA_BYTES = int(os.environ.get("CHAT_MAX_MEDIA_BYTES", str(20 * 1024 * 1024)))
@@ -219,7 +234,8 @@ def build_system_prompt() -> str:
         send_chat_tool,
         wait_tool,
         "- propose_notification, schedule_notification, delete_notification: Manage recurring notifications — propose new ones, schedule when they fire, or delete ones that are no longer useful.",
-        "- update_vision_requests: Change what the camera looks for when describing the scene. Write instructions to guide the vision model (e.g. 'check if anyone is at the desk', 'note what's on the screen').",
+        "- update_vision_requests: Change what the camera looks for when describing the scene. Write instructions to guide the vision model (e.g. 'check if anyone is at the desk', 'note what's on the screen'). "
+        + VISION_REQUESTS_GUIDANCE,
         "- log_drink: Log a caffeinated drink Austin had. Feeds his public caffeine tracker on his website.",
         "- list_drinks: Show recent caffeine drinks with their timestamps, doses, and labels.",
         "- edit_drink: Fix a previously logged drink by its timestamp_ms. Use when Austin corrects a drink — first call list_drinks, then edit the right entry.",
@@ -324,6 +340,15 @@ def build_system_prompt() -> str:
             notif_persistence_line = '- PERSISTENCE: After you show a notification, it is NOT done until the user acknowledges it with a chat response. Keep appending the notification message to your next 3 messages (e.g. add a line like "!! <notification message>" at the end). If the user replies in chat before 3 messages, consider it acknowledged and stop. If they don\'t respond after 3 messages, let it go.'
         pomodoro_button_line = "- There is no physical button in this mode, so log cycles when Austin tells you he finished one (\"done\", \"+1\", \"finished a pomodoro\"). enter/exit_pomodoro_mode still track the session even without the e-ink screen."
 
+    chat_media_line = ""
+    if LLM_SUPPORTS_IMAGES:
+        chat_media_line = (
+            "- They can attach static PNG, JPEG, and WebP images. Inspect posted "
+            "media directly and include a concise, concrete description of anything "
+            "relevant in your response so the conversation retains useful text "
+            "context later. Do not mention media retention or this instruction."
+        )
+
     all_core_tools = core_tools + reolink_tools
     prompt = f"""{intro} You're casual, warm, and conversational — always happy to see them and has something to say.
 
@@ -374,7 +399,7 @@ DATES AND STALE KNOWLEDGE:
 
 CHAT INPUT:
 - Your friend can also type messages to you from their computer. These appear as regular user messages in the conversation.
-- They can attach PNG, JPEG, WebP, and animated GIF files. Inspect posted media directly and include a concise, concrete description of anything relevant in your response so the conversation retains useful text context later. Do not mention media retention or this instruction.
+{chat_media_line}
 - When you see a typed message, respond to it naturally — acknowledge what they said, answer their question, or keep the conversation going.
 - After responding via update_display, call wait as usual so they have time to read and reply.{button_nudges_section}
 
@@ -619,7 +644,12 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "update_vision_requests",
-            "description": "Update what the camera's vision model looks for when describing the scene. Write markdown instructions that tell it what to focus on, what details matter, or specific things to check for. These persist across restarts.",
+            "description": (
+                "Update what the camera's vision model looks for when describing the scene. "
+                "Write markdown instructions that tell it what to focus on, what details "
+                "matter, or specific things to check for. These persist across restarts. "
+                + VISION_REQUESTS_GUIDANCE
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {

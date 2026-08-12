@@ -55,6 +55,52 @@ class VisionRequestHistoryTests(unittest.TestCase):
             self.assertNotEqual(headed_commit, third_commit)
             self.assertIn("Manual note.", snapshot)
 
+    def test_update_stamps_the_active_mode_and_strips_agent_markers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            history = VisionRequestHistory(
+                repo_dir=os.path.join(directory, "history"), legacy_file=None
+            )
+            history.update("Report drink fullness.", "aarg_mlx")
+            stored = history.read()
+            self.assertTrue(stored.startswith("#!vision-mode aarg_mlx\n"))
+
+            # An agent that echoes the marker back must not double it, and must
+            # not be able to claim a mode other than the one that is active.
+            history.update("#!vision-mode generic\nReport drink fullness twice.", "aarg_mlx")
+            stored = history.read()
+            self.assertEqual(stored.count("#!vision-mode"), 1)
+            self.assertTrue(stored.startswith("#!vision-mode aarg_mlx\n"))
+            self.assertIn("twice", stored)
+
+    def test_unmarked_files_read_as_generic(self):
+        with tempfile.TemporaryDirectory() as directory:
+            history = VisionRequestHistory(
+                repo_dir=os.path.join(directory, "history"), legacy_file=None
+            )
+            with open(history.file_path, "w", encoding="utf-8") as handle:
+                handle.write("# Requests for Image Model\n\nLook for mugs.\n")
+
+            body, _, declared = history.snapshot_for("generic")
+            self.assertEqual(declared, "generic")
+            self.assertIn("Look for mugs.", body)
+
+    def test_snapshot_for_withholds_a_body_written_for_another_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            history = VisionRequestHistory(
+                repo_dir=os.path.join(directory, "history"), legacy_file=None
+            )
+            history.update("Report drink fullness.", "aarg_mlx")
+
+            body, commit, declared = history.snapshot_for("generic")
+            self.assertEqual(body, "")
+            self.assertEqual(declared, "aarg_mlx")
+            self.assertEqual(len(commit), 40)
+
+            body, _, declared = history.snapshot_for("aarg_mlx")
+            self.assertIn("Report drink fullness.", body)
+            self.assertEqual(declared, "aarg_mlx")
+            self.assertNotIn("#!vision-mode", body)
+
     def test_unchanged_update_keeps_commit(self):
         with tempfile.TemporaryDirectory() as directory:
             history = VisionRequestHistory(

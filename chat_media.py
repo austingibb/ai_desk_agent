@@ -1,4 +1,4 @@
-"""Validation and message construction for user-posted chat images and GIFs."""
+"""Validation and message construction for user-posted static chat images."""
 
 import base64
 import binascii
@@ -10,14 +10,13 @@ from config import CHAT_MAX_IMAGES_PER_MESSAGE, CHAT_MAX_MEDIA_BYTES
 
 
 ALLOWED_IMAGE_TYPES = {
-    "image/gif",
     "image/jpeg",
     "image/png",
     "image/webp",
 }
 
 _DATA_URI_RE = re.compile(
-    r"^data:(image/(?:gif|jpeg|jpg|png|webp));base64,([A-Za-z0-9+/]*={0,2})$",
+    r"^data:(image/(?:jpeg|jpg|png|webp));base64,([A-Za-z0-9+/]*={0,2})$",
     re.IGNORECASE,
 )
 
@@ -36,8 +35,6 @@ def _normalized_mime(value: str) -> str:
 
 
 def _has_valid_signature(mime: str, data: bytes) -> bool:
-    if mime == "image/gif":
-        return data.startswith((b"GIF87a", b"GIF89a"))
     if mime == "image/jpeg":
         return data.startswith(b"\xff\xd8\xff")
     if mime == "image/png":
@@ -48,14 +45,8 @@ def _has_valid_signature(mime: str, data: bytes) -> bool:
 
 
 def _attachment_fallback_text(attachments: list) -> str:
-    gifs = sum(1 for a in attachments if a.get("type") == "image/gif")
-    stills = len(attachments) - gifs
-    labels = []
-    if stills:
-        labels.append(f"{stills} image{'s' if stills != 1 else ''}")
-    if gifs:
-        labels.append(f"{gifs} animated GIF{'s' if gifs != 1 else ''}")
-    return f"The user shared {' and '.join(labels)}. Respond to what they shared."
+    count = len(attachments)
+    return f"The user shared {count} image{'s' if count != 1 else ''}. Respond to what they shared."
 
 
 def chat_content_text(content) -> str:
@@ -110,7 +101,7 @@ def build_chat_message(message: str, images) -> tuple[str | list, list]:
         match = _DATA_URI_RE.fullmatch(data_url)
         if not match:
             raise ChatMediaError(
-                f"Image {index + 1} must be a PNG, JPEG, WebP, or GIF."
+                f"Image {index + 1} must be a static PNG, JPEG, or WebP image."
             )
         data_mime = _normalized_mime(match.group(1))
         if data_mime not in ALLOWED_IMAGE_TYPES:

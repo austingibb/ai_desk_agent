@@ -1,9 +1,10 @@
 """Minimal MCP JSON-RPC client for Brave Search MCP server over SSE/HTTP transport."""
 
 import json
+import os
 import requests
 
-MCP_URL = "http://192.168.0.4:8089/mcp"
+MCP_URL = os.environ.get("MCP_URL", "http://localhost:8089/mcp")
 JSONRPC = "2.0"
 
 

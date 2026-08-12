@@ -91,7 +91,7 @@ A shared lock allows only one vision inference at a time, so an on-demand captur
 
 ## How it works
 
-Two models split the work. A hosted brain (MiniMax M3 on OpenRouter by default) does the reasoning, tool calling, conversation, and decisions. A local vision model does room perception, and nothing else: a background thread captures frames when motion warrants it and caches the description, so the brain's `take_photo` tool returns instantly.
+Two models split the work. A hosted brain (DeepSeek V4 Flash on OpenRouter by default) does the reasoning, tool calling, conversation, and decisions. A local vision model does room perception, and nothing else: a background thread captures frames when motion warrants it and caches the description, so the brain's `take_photo` tool returns instantly.
 
 ### Why the eyes are local
 
@@ -99,11 +99,11 @@ The split is a privacy boundary, not a performance trick.
 
 A text description and a photograph are not the same risk. "One person at the desk, lamp on, laptop open, room is a mess" is about as identifying as a weather report. The frame it came from is not. That image has your face in it, your apartment, whatever is on your screen, whatever is on your floor, and a timestamp saying you were home.
 
-And it isn't only your call to make. Your roommate walking past, a partner asleep in the background, someone on a video call behind you, a friend who came over for an hour. None of them agreed to be photographed every few minutes and uploaded to a company's servers. MiniMax is a Chinese company, but that's not really the point. Every hosted model means someone else's hardware, in a jurisdiction you didn't pick, under a retention policy you didn't write.
+And it isn't only your call to make. Your roommate walking past, a partner asleep in the background, someone on a video call behind you, a friend who came over for an hour. None of them agreed to be photographed every few minutes and uploaded to a company's servers. The hosted brain's provider isn't really the point. Every hosted model means someone else's hardware, in a jurisdiction you didn't pick, under a retention policy you didn't write.
 
-So the room camera only ever talks to a model running on hardware you own. Only the text description crosses the network. There's one exception, and it's yours to make: an image you paste into chat goes straight to the brain, because you chose to send that one.
+So the room camera only ever talks to a model running on hardware you own. Only the text description crosses the network. When `LLM_SUPPORTS_IMAGES=1`, an image you deliberately attach in chat is the exception and goes straight to the brain.
 
-Chat uploads stay only in the newest 30 messages and are never written to `context.json`. After that they're replaced by the post text plus the model's description of them, so old photos don't accumulate in a file on disk.
+When enabled, chat uploads stay only in the newest 30 messages and are never written to `context.json`. After that they're replaced by the post text plus the model's description of them, so old photos don't accumulate in a file on disk.
 
 Everything the vision model is asked, and everything it answers, is logged locally. See [Vision audit trail](#vision-audit-trail).
 
@@ -150,7 +150,8 @@ Everything is set with environment variables or a `.env` file.
 | Variable | Default | What it does |
 |----------|---------|-------------|
 | `LLM_API_KEY` | _(required)_ | OpenRouter API key |
-| `LLM_MODEL` | `minimax/minimax-m3` | Multimodal brain model |
+| `LLM_MODEL` | `deepseek/deepseek-v4-flash-0731` | Hosted brain model |
+| `LLM_SUPPORTS_IMAGES` | `0` | `1` enables chat image uploads for a compatible brain model |
 | `VISION_PROVIDER` | `generic` | `generic` free-text request, or `aarg_mlx` structured Gemma vision |
 | `VISION_BASE_URL` | provider-specific | Vision server URL |
 | `VISION_MODEL` | provider-specific | Vision model id |
@@ -163,14 +164,15 @@ Everything is set with environment variables or a `.env` file.
 | `ENABLE_REOLINK` | `1` | `0` disables the network security-camera tools |
 | `ENABLE_TTS` | `0` | `1` enables Piper TTS |
 | `ENABLE_WEB_SEARCH` | `1` | `0` runs without the Brave Search MCP server |
+| `MCP_URL` | `http://localhost:8089/mcp` | Brave Search MCP endpoint |
 | `ENABLE_STATUS_PUBLISH` | `1` | Publish `{active, drinks}` to S3, needs `STATUS_S3_BUCKET` |
 | `NOTIFICATION_APPROVAL_MODE` | `smart` | `smart` interprets chat replies, `legacy` is button-only |
 | `CAMERA_BACKEND` | `auto` | `picamera2` on Pi, OpenCV on macOS |
 | `CAMERA_DEVICE_INDEX` | `0` | OpenCV webcam index |
 | `CHAT_PASSWORD` | `admin` | Web chat login password |
 | `CHAT_USE_HTTPS` | `0` | `1` enables HTTPS (`SSL_CERT_FILE` / `SSL_KEY_FILE`) |
-| `CHAT_MAX_IMAGES_PER_MESSAGE` | `4` | Attachment count limit per message |
-| `CHAT_MAX_MEDIA_BYTES` | `20971520` | Decoded attachment bytes per message (20 MB) |
+| `CHAT_MAX_IMAGES_PER_MESSAGE` | `4` | Attachment count limit when image support is enabled |
+| `CHAT_MAX_MEDIA_BYTES` | `20971520` | Decoded attachment bytes per message when enabled (20 MB) |
 | `COMPACT_AFTER_N_MESSAGES` | `150` | Message count before compaction triggers |
 
 ## Deployment
@@ -200,7 +202,7 @@ The display holds about 140 characters. That constraint is doing real work: it f
 What each surface adds:
 
 - **E-ink display.** The ambient one. It's just there in your peripheral vision, no notification, no sound.
-- **Web chat.** Password-protected UI on port 8080. Longer messages, and you can type, paste, select, or drag in PNG, JPEG, WebP, and animated GIF files. Optional HTTPS via mkcert.
+- **Web chat.** Password-protected UI on port 8080. Longer messages, plus static PNG, JPEG, and WebP uploads when `LLM_SUPPORTS_IMAGES=1`. Optional HTTPS via mkcert.
 - **Physical buttons.** Two GPIO buttons. Nudge the AI into saying something, or approve a proposed notification without opening a browser.
 - **Voice.** With `ENABLE_TTS=1`, display messages are spoken through a local Piper server. Non-blocking, and new speech interrupts old.
 - **Notifications.** The AI proposes recurring reminders like stretch breaks or "it's getting late". In `smart` mode it interprets natural chat replies; in `legacy` mode only a physical button resolves a proposal. A scoring system tracks what you actually engage with.

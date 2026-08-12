@@ -17,7 +17,7 @@ Orchestrator (main.py): Pi 5, or any single machine in chat-only mode
 ├── config.py         → constants, system prompt, tool definitions, feature flags
 ├── ai_client.py      → AIClient (brain/OpenRouter) + VisionClient (local, 2 providers)
 ├── context.py        → message store, timestamps, compaction, pairing repair
-├── chat_media.py     → user image/GIF validation + multimodal content construction
+├── chat_media.py     → user image validation + multimodal content construction
 ├── camera.py         → capture backend: picamera2 on Pi, OpenCV/AVFoundation on macOS
 ├── scene_change.py   → motion detection via phase correlation (Pillow + numpy)
 ├── vision_history.py → nested-git prompt history + JSONL description log
@@ -47,9 +47,10 @@ It chunks `context.json` and asks the brain to report mistakes and improvements.
 
 ## Two models
 
-- **Brain** (`LLM_MODEL`, default `minimax/minimax-m3` on OpenRouter). Reasoning,
-  tool calling, display decisions, notification management, compaction, and direct
-  understanding of images and GIFs the user posts in chat.
+- **Brain** (`LLM_MODEL`, default `deepseek/deepseek-v4-flash-0731` on
+  OpenRouter). Reasoning, tool calling, display decisions, notification
+  management, and compaction. `LLM_SUPPORTS_IMAGES` declares whether it can
+  directly understand images posted in chat; the default model cannot.
 - **Vision** (`VISION_MODEL`, local). Describes room-camera frames. Nothing else.
 
 The brain reaches the room through `take_photo`, which returns the cached
@@ -57,11 +58,12 @@ description from the background vision thread with no round trip. `capture_photo
 takes a fresh frame and blocks on the vision model (up to `VISION_TIMEOUT`); it
 exists for moments that genuinely need current information and should stay rare.
 
-User-posted PNG/JPEG/WebP/GIF files skip the local model entirely and go to the
-brain as `image_url` content, because the user chose to send those. Raw media
-lives only in the newest `KEEP_LAST_N_MESSAGES` messages and is never written to
-`context.json`; `demote_old_images()` replaces older uploads with the post text
-plus the brain's contemporaneous description before compaction ever sees them.
+When `LLM_SUPPORTS_IMAGES=1`, user-posted PNG/JPEG/WebP files skip the local
+model and go to the brain as `image_url` content. Raw media lives only in the
+newest `KEEP_LAST_N_MESSAGES` messages and is never written to `context.json`;
+`demote_old_images()` replaces older uploads with the post text plus the brain's
+contemporaneous description before compaction ever sees them. With the flag off,
+the server rejects image payloads and the chat UI hides its attachment control.
 
 `VisionClient` supports two providers:
 
@@ -218,7 +220,7 @@ Web UI on `:8080`, password login with a session cookie, optional HTTPS.
 | `GET /` | Chat HTML, or the login page |
 | `GET /login`, `POST /login` | Password form; sets a 32-byte `HttpOnly` token, `CHAT_SESSION_DAYS` |
 | `GET /chat` | Last 50 filtered messages as JSON, deduped between context and queue |
-| `POST /chat` | Text + optional base64 attachments; validates, queues, signals the loop |
+| `POST /chat` | Text + capability-gated base64 attachments; validates, queues, signals the loop |
 | `GET /chat/events` | SSE stream of UI state and transcript revisions |
 | `GET /chat/media/<sha256>` | Authenticated preview served from live context |
 | `PATCH /chat/queue/<id>` | Edit a queued message before the agent drains it |
@@ -231,8 +233,8 @@ revision with heartbeats; limits are `CHAT_SSE_MAX_STREAMS`,
 `CHAT_SSE_HEARTBEAT_SECONDS`, `CHAT_SSE_IDLE_SECONDS`.
 
 The client appends new messages rather than replacing the DOM, tracks what it has
-rendered by content signature, renders uploaded media, supports file selection,
-paste, and drag/drop, and auto-scrolls only when already at the bottom.
+rendered by content signature, renders uploaded media, capability-gates file
+selection/paste/drag-drop, and auto-scrolls only when already at the bottom.
 
 ## Vision request history
 
@@ -271,7 +273,8 @@ Everything is in `config.py`, all env-overridable. Defaults worth knowing:
 
 | Group | Constants |
 |-------|-----------|
-| Brain | `LLM_BASE_URL` (OpenRouter), `LLM_API_KEY`, `LLM_MODEL`, `LLM_MAX_TOKENS` (2048), `LLM_MAX_TOKENS_COMPACT` (64000), `LLM_TIMEOUT` (120) |
+| Network | `DISPLAY_SERVER_URL`, `MCP_URL` (Brave Search MCP) |
+| Brain | `LLM_BASE_URL` (OpenRouter), `LLM_API_KEY`, `LLM_MODEL`, `LLM_SUPPORTS_IMAGES`, `LLM_MAX_TOKENS` (2048), `LLM_MAX_TOKENS_COMPACT` (64000), `LLM_TIMEOUT` (120) |
 | Vision | `VISION_PROVIDER` (`generic`), `VISION_BASE_URL`, `VISION_MODEL`, `VISION_AARG_MLX_DIR`, `VISION_ENABLE_THINKING`, `VISION_THINKING_BUDGET` (1024), `VISION_MAX_TOKENS`, `VISION_TIMEOUT` (120), `VISION_POLL_INTERVAL` (180), `MOTION_POLL_INTERVAL` (2.0), `CHILL_TIMEOUT` (300) |
 | Context | `COMPACT_AFTER_N_MESSAGES` (150), `KEEP_LAST_N_MESSAGES` (30), `MAX_CONTEXT_TOKENS` (64000), `MERGE_SUMMARIES_AFTER` (20), `MERGE_SUMMARIES_TARGET` (15) |
 | Pacing | `BACKOFF_BASE` (10), `BACKOFF_MAX` (900), `MAX_TOOL_CALLS_PER_TURN` (10), `MIN_DISPLAY_INTERVAL` (10), `MIN_WAIT_SECONDS` (10), `MAX_WAIT_SECONDS` (1800), `IDLE_TIMEOUT` (60) |

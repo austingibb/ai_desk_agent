@@ -17,8 +17,19 @@ from config import (
 )
 
 
-DEFAULT_REQUESTS = "# Requests for Image Model\n"
 REQUESTS_HEADING = "# Requests for Image Model"
+
+# Requests written for the free-text path are the wrong shape for the structured
+# one and vice versa, so the file declares which it was written for. The marker
+# is written and parsed here; the agent never types it.
+MODE_MARKER_PREFIX = "#!vision-mode"
+
+# Every file predating this marker was written for the free-text path, which was
+# the only path that existed. Treating unmarked files as generic keeps the Pi
+# working untouched and correctly flags an aarg_mlx box as stale.
+UNMARKED_MODE = "generic"
+
+DEFAULT_REQUESTS = f"{MODE_MARKER_PREFIX} {UNMARKED_MODE}\n{REQUESTS_HEADING}\n"
 
 
 class VisionRequestHistory:
@@ -90,15 +101,32 @@ class VisionRequestHistory:
             except FileNotFoundError:
                 return ""
 
-    def update(self, requests_text: str) -> str:
-        """Replace the requests and create an independent local commit."""
-        requests_text = requests_text.strip()
+    @staticmethod
+    def split_mode(text: str) -> tuple[str, str]:
+        """Split stored text into its declared mode and the body below it."""
+        lines = text.lstrip().splitlines()
+        if lines and lines[0].startswith(MODE_MARKER_PREFIX):
+            declared = lines[0][len(MODE_MARKER_PREFIX):].strip().lower()
+            return (declared or UNMARKED_MODE), "\n".join(lines[1:]).strip()
+        return UNMARKED_MODE, "\n".join(lines).strip()
+
+    def update(self, requests_text: str, mode: str = UNMARKED_MODE) -> str:
+        """Replace the requests and create an independent local commit.
+
+        ``mode`` is the vision provider these requests are written for. It is
+        stamped here rather than accepted from the caller's text so the marker
+        cannot drift from the provider that was actually active.
+        """
+        _, requests_text = self.split_mode(requests_text)
         while requests_text.startswith(REQUESTS_HEADING):
             requests_text = requests_text[len(REQUESTS_HEADING):].lstrip()
         if not requests_text:
             raise ValueError("vision requests cannot be empty")
+        mode = (mode or UNMARKED_MODE).strip().lower()
         with self._lock:
-            self._atomic_write(f"{REQUESTS_HEADING}\n\n{requests_text}\n")
+            self._atomic_write(
+                f"{MODE_MARKER_PREFIX} {mode}\n{REQUESTS_HEADING}\n\n{requests_text}\n"
+            )
             return self.commit_if_changed("Update vision requests")
 
     def snapshot(self) -> tuple[str, str]:
@@ -106,6 +134,20 @@ class VisionRequestHistory:
         with self._lock:
             commit = self.commit_if_changed()
             return self.read(), commit
+
+    def snapshot_for(self, provider: str) -> tuple[str, str, str]:
+        """Return (body, commit, declared_mode), with an empty body if stale.
+
+        A body written for another provider is withheld rather than sent: the
+        two shapes are not interchangeable, which is the whole reason the marker
+        exists. Callers report the mismatch so the agent can rewrite them.
+        """
+        with self._lock:
+            text, commit = self.snapshot()
+        declared, body = self.split_mode(text)
+        if declared != (provider or UNMARKED_MODE).strip().lower():
+            return "", commit, declared
+        return body, commit, declared
 
     def commit_if_changed(self, message: str = "Record vision request changes") -> str:
         """Commit manual or programmatic edits and return the full HEAD hash."""

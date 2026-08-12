@@ -1,9 +1,12 @@
 import {
+  CHAT_COLOR_PALETTES,
+  contrastingTextColor,
   formatAgentState,
   menuItems,
   mutationDisabled,
   nextTakeover,
   reconcilePlan,
+  resolveChatTheme,
   shouldApplyAgentSnapshot,
 } from 'chat-model';
 
@@ -21,8 +24,18 @@ const send=document.getElementById('send');
 const fileInput=document.getElementById('file-input');
 const attachmentDiv=document.getElementById('attachments');
 const uploadError=document.getElementById('upload-error');
+const themeCustomizer=document.getElementById('theme-customizer');
+const colorPalette=document.getElementById('color-palette');
+const themeTriggers=Array.from(document.querySelectorAll('.theme-trigger'));
 
-const allowedTypes=new Set(['image/png','image/jpeg','image/webp','image/gif']);
+const allowedTypes=new Set(['image/png','image/jpeg','image/webp']);
+const supportsImages=config.supportsImages===true;
+const themeStorageKey='ai-roommate-chat-theme-v1';
+const themeLabels={
+  background:'Trim & background',
+  assistant:'AI chat',
+  user:'My chat',
+};
 const messageNodes=new Map();
 let messagesById=new Map();
 let orderedMessages=[];
@@ -38,6 +51,120 @@ let takeoverTimer=null;
 let takeoverFrame=null;
 let fallbackTimer=null;
 let refreshPromise=null;
+let activeThemeKey=null;
+let chatTheme=resolveChatTheme(readStoredTheme());
+
+attach.hidden=!supportsImages;
+fileInput.disabled=!supportsImages;
+
+function readStoredTheme(){
+  try{
+    return JSON.parse(localStorage.getItem(themeStorageKey)||'{}');
+  }catch(error){
+    return {};
+  }
+}
+
+function themeOption(key,value){
+  return CHAT_COLOR_PALETTES[key].find(option=>option.value===value);
+}
+
+function applyChatTheme(nextTheme,{persist=true}={}){
+  chatTheme=resolveChatTheme(nextTheme);
+  const root=document.documentElement;
+  root.style.setProperty('--canvas',chatTheme.background);
+  root.style.setProperty('--trim-text',contrastingTextColor(chatTheme.background));
+  root.style.setProperty('--incoming',chatTheme.assistant);
+  root.style.setProperty('--incoming-text',contrastingTextColor(chatTheme.assistant));
+  root.style.setProperty('--user-chat',chatTheme.user);
+  root.style.setProperty('--user-chat-text',contrastingTextColor(chatTheme.user));
+  root.style.colorScheme=contrastingTextColor(chatTheme.background)==='#000000'?'light':'dark';
+
+  for(const trigger of themeTriggers){
+    const key=trigger.dataset.themeKey;
+    const option=themeOption(key,chatTheme[key]);
+    trigger.setAttribute(
+      'aria-label',`${themeLabels[key]} color. Current: ${option.name}.`,
+    );
+    trigger.title=`${themeLabels[key]}: ${option.name}`;
+  }
+  if(activeThemeKey){
+    colorPalette.querySelectorAll('.palette-color').forEach(button=>{
+      const selected=button.dataset.color===chatTheme[activeThemeKey];
+      button.classList.toggle('selected',selected);
+      button.setAttribute('aria-selected',String(selected));
+    });
+  }
+  if(persist){
+    try{localStorage.setItem(themeStorageKey,JSON.stringify(chatTheme));}catch(error){}
+  }
+}
+
+function renderColorPalette(key){
+  colorPalette.replaceChildren();
+  colorPalette.setAttribute('aria-label',`${themeLabels[key]} colors`);
+  for(const option of CHAT_COLOR_PALETTES[key]){
+    const button=document.createElement('button');
+    const selected=option.value===chatTheme[key];
+    button.type='button';
+    button.className=`palette-color${selected?' selected':''}`;
+    button.role='option';
+    button.style.backgroundColor=option.value;
+    button.dataset.color=option.value;
+    button.title=`${option.name} (${option.value})`;
+    button.setAttribute('aria-label',`${option.name}, ${option.value}`);
+    button.setAttribute('aria-selected',String(selected));
+    button.addEventListener('click',()=>{
+      applyChatTheme({...chatTheme,[key]:option.value});
+    });
+    colorPalette.append(button);
+  }
+}
+
+function closeColorPalette(){
+  colorPalette.classList.remove('open');
+  colorPalette.setAttribute('aria-hidden','true');
+  themeTriggers.forEach(trigger=>trigger.setAttribute('aria-expanded','false'));
+  activeThemeKey=null;
+}
+
+function openColorPalette(key){
+  activeThemeKey=key;
+  renderColorPalette(key);
+  colorPalette.classList.add('open');
+  colorPalette.setAttribute('aria-hidden','false');
+  themeTriggers.forEach(trigger=>{
+    trigger.setAttribute('aria-expanded',String(trigger.dataset.themeKey===key));
+  });
+  requestAnimationFrame(()=>{
+    colorPalette.querySelector('.selected')?.scrollIntoView({block:'nearest',inline:'center'});
+  });
+}
+
+for(const trigger of themeTriggers){
+  trigger.addEventListener('click',event=>{
+    event.stopPropagation();
+    closeMenu();
+    const key=trigger.dataset.themeKey;
+    if(activeThemeKey===key&&colorPalette.classList.contains('open'))closeColorPalette();
+    else openColorPalette(key);
+  });
+}
+
+colorPalette.addEventListener('keydown',event=>{
+  if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;
+  const options=Array.from(colorPalette.querySelectorAll('.palette-color'));
+  const current=Math.max(0,options.indexOf(document.activeElement));
+  let next=current;
+  if(event.key==='ArrowLeft')next=Math.max(0,current-1);
+  if(event.key==='ArrowRight')next=Math.min(options.length-1,current+1);
+  if(event.key==='Home')next=0;
+  if(event.key==='End')next=options.length-1;
+  event.preventDefault();
+  options[next]?.focus();
+});
+
+applyChatTheme(chatTheme,{persist:false});
 
 function isAgentLocked(){
   return !offline&&Boolean(agentState.locks_input);
@@ -170,7 +297,7 @@ function applyAgentState(agent,{isOffline=false,serverId=null}={}){
   modeChip.className=offline?'offline':agentState.mode;
   const locked=isAgentLocked();
   input.disabled=locked;
-  attach.disabled=locked;
+  attach.disabled=locked||!supportsImages;
   send.disabled=locked||sending;
   document.querySelectorAll('.attachment button').forEach(button=>{
     button.disabled=locked||sending;
@@ -196,6 +323,7 @@ function openMenu(id,trigger){
   const message=messagesById.get(id);
   if(!message)return;
   closeMenu();
+  closeColorPalette();
   menuId=id;
   trigger.setAttribute('aria-expanded','true');
   for(const action of menuItems(message)){
@@ -424,7 +552,7 @@ function clearAttachments(){
 function restoreComposer(payload){
   clearAttachments();
   input.value=payload?.text||'';
-  selectedFiles=(payload?.images||[]).map(image=>({
+  selectedFiles=(supportsImages?payload?.images||[]:[]).map(image=>({
     name:image.name||'image',
     type:image.type,
     size:dataURLBytes(image.data_url),
@@ -438,9 +566,13 @@ function restoreComposer(payload){
 
 function addFiles(files){
   showUploadError();
+  if(!supportsImages){
+    showUploadError('The configured model does not support image uploads.');
+    return;
+  }
   for(const file of files){
     if(!allowedTypes.has(file.type)){
-      showUploadError(`${file.name} is not a supported image or GIF.`);
+      showUploadError(`${file.name} is not supported. Use a static PNG, JPEG, or WebP image.`);
       continue;
     }
     if(selectedFiles.length>=config.maxImages){
@@ -487,12 +619,14 @@ async function filePayload(item){
   };
 }
 
-attach.addEventListener('click',()=>fileInput.click());
+attach.addEventListener('click',()=>{
+  if(supportsImages)fileInput.click();
+});
 fileInput.addEventListener('change',()=>addFiles(fileInput.files));
 
 let dragDepth=0;
 document.addEventListener('dragenter',event=>{
-  if(Array.from(event.dataTransfer?.items||[]).some(item=>item.kind==='file')){
+  if(supportsImages&&Array.from(event.dataTransfer?.items||[]).some(item=>item.kind==='file')){
     dragDepth++;
     document.body.classList.add('dragging');
   }
@@ -526,7 +660,9 @@ form.addEventListener('submit',async event=>{
   applyAgentState(agentState,{isOffline:offline});
   renderAttachments();
   try{
-    const images=await Promise.all(submittedFiles.map(filePayload));
+    const images=supportsImages
+      ?await Promise.all(submittedFiles.map(filePayload))
+      :[];
     const response=await fetch('/chat',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
@@ -606,12 +742,19 @@ function connectEvents(){
 
 document.addEventListener('click',event=>{
   if(!menu.contains(event.target)&&!event.target.closest('.menu-trigger'))closeMenu();
+  if(!themeCustomizer.contains(event.target))closeColorPalette();
 });
 document.addEventListener('keydown',event=>{
-  if(event.key==='Escape'&&menuId)closeMenu();
+  if(event.key==='Escape'){
+    if(menuId)closeMenu();
+    if(activeThemeKey)closeColorPalette();
+  }
 });
 messagesDiv.addEventListener('scroll',closeMenu,{passive:true});
-window.addEventListener('resize',closeMenu);
+window.addEventListener('resize',()=>{
+  closeMenu();
+  closeColorPalette();
+});
 
 refresh().catch(()=>{});
 connectEvents();
