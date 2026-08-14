@@ -112,13 +112,21 @@ Everything the vision model is asked, and everything it answers, is logged local
 The brain runs an autonomous loop with no timers or hardcoded behaviors:
 
 1. Send conversation history + tool definitions to the brain
-2. It picks an action: check the room, update the display, send a chat message, search the web, log a drink or pomodoro, wait, or manage notifications
+2. It picks an action: check the room, read the activity timeline, update the display, send a chat message, search the web, log a drink or pomodoro, wait, or manage notifications
 3. Execute the tool calls, feed results back
 4. Repeat
 
 When nothing is happening it idles. A chat message or button press wakes it. It paces itself, backing off when ignored and engaging more during conversation.
 
 Conversation history persists across restarts and auto-compacts at 150 messages, summarizing older ones while keeping the last 30 intact. Brave Search is available through MCP when `ENABLE_WEB_SEARCH=1`. When the room is still for 5 minutes the vision loop enters chill mode and stops describing frames until something moves.
+
+Each successful room description also updates a local activity timeline. The state
+is deliberately small: `AK / working at computer`, or `AFK` with `out`,
+`relaxing`, `sleeping`, `eating`, `exercising`, or `chores`. Eating remains AFK
+even at the computer. The current state appears beside the color picker in web
+chat, and the brain can read recent segments without being allowed to write them.
+Only state labels, timestamps, capture source, and vision-model text evidence are
+stored in `activity.json`; no camera images are added to the log.
 
 ## Vision audit trail
 
@@ -159,6 +167,9 @@ Everything is set with environment variables or a `.env` file.
 | `VISION_ENABLE_THINKING` | `1` | Enable thinking in `aarg_mlx` perception requests |
 | `VISION_THINKING_BUDGET` | `1024` | Thinking-token budget |
 | `VISION_POLL_INTERVAL` | `180` | Seconds between background captures |
+| `ENABLE_ACTIVITY_LOG` | `1` | Classify camera descriptions into a persistent AK/AFK timeline |
+| `ACTIVITY_LOG_FILE` | `activity.json` | Local timeline state file |
+| `ACTIVITY_RETENTION_SECONDS` | `7776000` | Keep closed activity segments for 90 days |
 | `ENABLE_DISPLAY` | `1` | `0` = chat-only mode (no e-ink, no GPIO) |
 | `ENABLE_CAMERA` | `1` | `0` disables the camera and all vision tools |
 | `ENABLE_REOLINK` | `1` | `0` disables the network security-camera tools |

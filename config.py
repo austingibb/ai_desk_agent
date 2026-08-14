@@ -185,6 +185,19 @@ SCENE_RMS_THRESHOLD = float(os.environ.get("SCENE_RMS_THRESHOLD", "12.0"))
 SCENE_PCT_THRESHOLD = float(os.environ.get("SCENE_PCT_THRESHOLD", "0.05"))
 SCENE_MAX_STALE_SECONDS = int(os.environ.get("SCENE_MAX_STALE_SECONDS", "1800"))
 
+# Camera-derived AK/AFK activity timeline. The agent can read this log but does
+# not maintain it; observations are classified and persisted by the harness.
+ENABLE_ACTIVITY_LOG = os.environ.get("ENABLE_ACTIVITY_LOG", "1") == "1"
+ACTIVITY_LOG_FILE = os.environ.get(
+    "ACTIVITY_LOG_FILE", os.path.join(PROJECT_DIR, "activity.json")
+)
+ACTIVITY_RETENTION_SECONDS = int(
+    os.environ.get("ACTIVITY_RETENTION_SECONDS", str(90 * 86400))
+)
+ACTIVITY_CONFIRMATION_OBSERVATIONS = int(
+    os.environ.get("ACTIVITY_CONFIRMATION_OBSERVATIONS", "2")
+)
+
 # Caffeine status feed — public JSON published to S3, read by aarg.dev.
 # NOTE: the feed (desk presence + drink log) is world-readable when enabled.
 # AWS creds (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_DEFAULT_REGION)
@@ -248,6 +261,11 @@ def build_system_prompt() -> str:
         core_tools.insert(
             6,
             "- resolve_notification_proposal: Interpret the user's natural-language response to a pending notification proposal and approve or reject it.",
+        )
+    if ENABLE_ACTIVITY_LOG:
+        core_tools.append(
+            "- list_activity: Read the automatic AK/AFK activity timeline. The "
+            "camera harness maintains this log; do not ask the user to update it."
         )
 
     reolink_tools = []
@@ -349,6 +367,15 @@ def build_system_prompt() -> str:
             "context later. Do not mention media retention or this instruction."
         )
 
+    activity_tracking_section = ""
+    if ENABLE_ACTIVITY_LOG:
+        activity_tracking_section = """
+
+ACTIVITY TRACKING:
+- The harness automatically classifies camera observations into AK / working at computer, or AFK / out, relaxing, sleeping, eating, exercising, or chores.
+- Eating always counts as AFK / eating, including when it happens at the computer.
+- Use list_activity when Austin asks what he has been doing or how long an activity lasted. Do not manually maintain or narrate the log after every camera observation."""
+
     all_core_tools = core_tools + reolink_tools
     prompt = f"""{intro} You're casual, warm, and conversational — always happy to see them and has something to say.
 
@@ -435,6 +462,8 @@ You track Austin's pomodoro focus cycles (25 min work + 5 min break each).
 - Log a completed cycle with log_pomodoro. When he corrects one ("that wasn't a real one", "delete the last one"), call list_pomodoros to find the timestamp_ms, then edit_pomodoro (use delete=true to remove a mistaken press). Don't ask for confirmation before fixing.
 - When he asks how he's doing, call pomodoro_stats and share it naturally — cycles today, this week, current streak, best streak. Streaks reset on their own at local midnight; you don't manage timers.
 - EXITING: stay in pomodoro mode while he's clearly still working. Only exit if he says he's done, OR he's gone quiet for a while and context says he's left (no button, no chat, no motion). If you get a nudge that he's been idle 30 min, use your judgment: if he seems gone or done, call exit_pomodoro_mode; if he might just be heads-down working, keep the screen up. Don't kill a session just because he's quiet and focused."""
+
+    prompt += activity_tracking_section
 
     # Append user-specific rules if the file exists
     try:
@@ -665,6 +694,27 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
+            "name": "list_activity",
+            "description": "Read the automatic camera-derived activity timeline. Returns AK / working at computer and AFK / out, relaxing, sleeping, eating, exercising, or chores segments. The harness maintains this log; never add entries from guesses or chat text.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of recent segments to return (default 20, maximum 100).",
+                    },
+                    "since_hours": {
+                        "type": "number",
+                        "description": "Optional lookback window in hours. Omit to read recent segments regardless of age.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "log_drink",
             "description": "Log a caffeinated drink Austin had. Appends to his public caffeine feed (his website charts it). Convert drink names to mg using the reference table in your instructions, or use an explicit amount if he gives one. Never log from camera evidence without his confirmation.",
             "parameters": {
@@ -887,6 +937,7 @@ TOOL_DEFINITIONS = [
 CAMERA_TOOL_NAMES = {"take_photo", "capture_photo", "update_vision_requests"}
 REOLINK_TOOL_NAMES = {"take_reolink_photo", "flash_camera_light", "flash_ir_light"}
 SMART_NOTIFICATION_TOOL_NAMES = {"resolve_notification_proposal"}
+ACTIVITY_TOOL_NAMES = {"list_activity"}
 
 def get_tool_definitions() -> list:
     result = list(TOOL_DEFINITIONS)
@@ -898,5 +949,10 @@ def get_tool_definitions() -> list:
         result = [
             t for t in result
             if t["function"]["name"] not in SMART_NOTIFICATION_TOOL_NAMES
+        ]
+    if not ENABLE_ACTIVITY_LOG:
+        result = [
+            t for t in result
+            if t["function"]["name"] not in ACTIVITY_TOOL_NAMES
         ]
     return result

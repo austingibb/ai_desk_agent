@@ -160,6 +160,41 @@ body {
   white-space: nowrap;
 }
 
+#activity-state {
+  position: absolute;
+  left: 92px;
+  display: inline-flex;
+  min-height: 25px;
+  max-width: min(32vw, 220px);
+  align-items: center;
+  overflow: hidden;
+  padding: 3px 9px;
+  border: 1px solid rgba(142, 142, 147, .4);
+  border-radius: 999px;
+  background: rgba(142, 142, 147, .1);
+  color: #aeaeb2;
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#activity-state[hidden] {
+  display: none;
+}
+
+#activity-state.ak {
+  border-color: rgba(48, 209, 88, .36);
+  background: rgba(48, 209, 88, .1);
+  color: #30d158;
+}
+
+#activity-state.afk {
+  border-color: rgba(255, 214, 10, .38);
+  background: rgba(255, 214, 10, .1);
+  color: #ffd60a;
+}
+
 #agent-mode {
   position: absolute;
   right: 14px;
@@ -615,6 +650,10 @@ body.dragging::after {
     max-width: 22vw;
   }
 
+  #activity-state {
+    max-width: 34vw;
+  }
+
   #agent-mode {
     max-width: 62vw;
   }
@@ -625,6 +664,12 @@ body.dragging::after {
 
   .inline-editor textarea {
     width: 70vw;
+  }
+}
+
+@media (max-width: 520px) {
+  .chat-title {
+    display: none;
   }
 }
 

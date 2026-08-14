@@ -51,6 +51,7 @@ from config import (
     LLM_SUPPORTS_IMAGES,
     ENABLE_CAMERA,
     ENABLE_DISPLAY,
+    ENABLE_ACTIVITY_LOG,
     VISION_PROVIDER,
     VISION_REQUESTS_GUIDANCE,
     VISION_POLL_INTERVAL,
@@ -70,6 +71,7 @@ from config import (
 )
 from notifications import NotificationStore
 from caffeine import DrinkStore
+from activity import ActivityStore, classify_scene
 from pomodoro import PomodoroStore
 from presence import ActiveTracker
 from status_publisher import StatusPublisher
@@ -141,6 +143,7 @@ TOOL_LABELS = {
     "log_drink": "logging a drink",
     "list_drinks": "checking the drink log",
     "edit_drink": "editing the drink log",
+    "list_activity": "checking activity history",
     "log_pomodoro": "logging a pomodoro",
     "list_pomodoros": "checking pomodoro history",
     "edit_pomodoro": "editing pomodoro history",
@@ -174,7 +177,7 @@ def _chat_asset_version(static_dir: str) -> str:
 class ChatUIState:
     """Thread-safe agent state and chat invalidation publisher."""
 
-    def __init__(self):
+    def __init__(self, activity_enabled: bool = False, activity: dict | None = None):
         self.condition = threading.Condition()
         self.server_id = uuid.uuid4().hex
         self.agent = {
@@ -183,6 +186,19 @@ class ChatUIState:
             "locks_input": False,
             "revision": 0,
         }
+        self.activity = {
+            "enabled": bool(activity_enabled),
+            "presence": None,
+            "activity": None,
+            "observed_at": None,
+            "revision": 0,
+        }
+        if activity:
+            self.activity.update({
+                "presence": activity.get("presence"),
+                "activity": activity.get("activity"),
+                "observed_at": activity.get("last_observed_at"),
+            })
         self.chat_revision = 0
         self.event_revision = 0
 
@@ -193,6 +209,7 @@ class ChatUIState:
     def _snapshot_locked(self) -> dict:
         return {
             "agent": dict(self.agent),
+            "activity": dict(self.activity),
             "server_id": self.server_id,
             "chat_revision": self.chat_revision,
             "event_revision": self.event_revision,
@@ -213,6 +230,24 @@ class ChatUIState:
                 "locks_input": bool(locks_input),
                 "revision": self.agent["revision"] + 1,
             }
+            self.event_revision += 1
+            self.condition.notify_all()
+
+    def set_activity(self, activity: dict | None):
+        with self.condition:
+            next_value = {
+                "enabled": self.activity["enabled"],
+                "presence": activity.get("presence") if activity else None,
+                "activity": activity.get("activity") if activity else None,
+                "observed_at": activity.get("last_observed_at") if activity else None,
+            }
+            changed = any(
+                self.activity.get(key) != value for key, value in next_value.items()
+            )
+            if not changed:
+                return
+            next_value["revision"] = self.activity["revision"] + 1
+            self.activity = next_value
             self.event_revision += 1
             self.condition.notify_all()
 
@@ -268,7 +303,11 @@ class Orchestrator:
         # Serializes cross-source snapshots and queue/context transfers without
         # making ordinary reads hold ctx_lock and chat_queue_lock together.
         self.chat_transfer_lock = threading.Lock()
-        self.ui_state = ChatUIState()
+        self.activity_store = ActivityStore() if ENABLE_ACTIVITY_LOG else None
+        self.ui_state = ChatUIState(
+            activity_enabled=ENABLE_ACTIVITY_LOG,
+            activity=self.activity_store.current() if self.activity_store else None,
+        )
         self.sse_slots = threading.BoundedSemaphore(max(1, CHAT_SSE_MAX_STREAMS))
         self.mcp_tools = []
         self.mcp = None
@@ -802,6 +841,8 @@ class Orchestrator:
             return self._tool_list_drinks(args)
         elif name == "edit_drink":
             return self._tool_edit_drink(args)
+        elif name == "list_activity":
+            return self._tool_list_activity(args)
         elif name == "log_pomodoro":
             return self._tool_log_pomodoro(args)
         elif name == "list_pomodoros":
@@ -1044,7 +1085,30 @@ class Orchestrator:
         }
         with self.scene_lock:
             self.latest_scene = scene
+        self._record_activity(description, captured_at, source)
         return scene
+
+    def _record_activity(self, description: str, captured_at: float, source: str):
+        """Classify and persist a main-camera description without involving the brain."""
+        if not self.activity_store:
+            return
+        try:
+            observation = classify_scene(description)
+            result = self.activity_store.observe(
+                observation,
+                observed_at=captured_at,
+                source=source,
+            )
+            current = result.get("current")
+            if current:
+                self.ui_state.set_activity(current)
+            if result.get("changed") and current:
+                info(
+                    f"[ACTIVITY] {current['presence']} / "
+                    f"{current['activity']} from {source}"
+                )
+        except Exception as exc:
+            info(f"[ACTIVITY] Observation error: {exc}")
 
     def _save_debug_image(self, jpeg_bytes: bytes):
         """Save captured image to debug_images/, prune files older than 24h."""
@@ -1375,6 +1439,59 @@ class Orchestrator:
             "status": "ok",
             "message": f"Updated drink: {updated['mg']}mg {updated['label']}",
             "drink": updated,
+        }
+
+    # --- Activity ---------------------------------------------------------
+
+    @staticmethod
+    def _format_activity_segment(segment: dict, now: float) -> dict:
+        started = float(segment.get("started_at", 0))
+        ended = segment.get("ended_at")
+        end_value = float(ended) if ended is not None else now
+        return {
+            "presence": segment.get("presence"),
+            "activity": segment.get("activity"),
+            "started_at": time.strftime(
+                "%Y-%m-%d %-I:%M%p", time.localtime(started)
+            ).lower().lstrip("0"),
+            "ended_at": (
+                time.strftime("%Y-%m-%d %-I:%M%p", time.localtime(end_value))
+                .lower().lstrip("0")
+                if ended is not None else None
+            ),
+            "duration_seconds": max(0, int(end_value - started)),
+            "last_observed_at": segment.get("last_observed_at"),
+            "source": segment.get("source", ""),
+            "evidence": segment.get("evidence", ""),
+            "current": ended is None,
+        }
+
+    def _tool_list_activity(self, args: dict) -> dict:
+        if not self.activity_store:
+            return {"status": "error", "message": "Activity logging is disabled."}
+        try:
+            limit = max(1, min(int(args.get("limit") or 20), 100))
+        except (TypeError, ValueError):
+            return {"status": "error", "message": "limit must be an integer."}
+        since_hours = args.get("since_hours")
+        if since_hours is not None:
+            try:
+                since_hours = max(0.0, float(since_hours))
+            except (TypeError, ValueError):
+                return {"status": "error", "message": "since_hours must be a number."}
+        now = time.time()
+        segments = self.activity_store.list_recent(
+            limit=limit,
+            since_hours=since_hours,
+            now=now,
+        )
+        formatted = [
+            self._format_activity_segment(segment, now) for segment in segments
+        ]
+        return {
+            "status": "ok",
+            "current": formatted[-1] if formatted and formatted[-1]["current"] else None,
+            "segments": formatted,
         }
 
     # --- Pomodoro ---------------------------------------------------------
@@ -2208,6 +2325,7 @@ class ChatHandler(BaseHTTPRequestHandler):
         self._send_json({
             "messages": filtered,
             "agent": ui_snapshot["agent"],
+            "activity": ui_snapshot["activity"],
             "server_id": ui_snapshot["server_id"],
             "chat_revision": ui_snapshot["chat_revision"],
         })
@@ -2328,6 +2446,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             def write_snapshot(value):
                 payload = json.dumps({
                     "agent": value["agent"],
+                    "activity": value["activity"],
                     "server_id": value["server_id"],
                     "chat_revision": value["chat_revision"],
                 }, separators=(",", ":")).encode()

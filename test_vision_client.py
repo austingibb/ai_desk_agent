@@ -333,6 +333,24 @@ class CameraTests(unittest.TestCase):
 
 
 class ConfigPromptTests(unittest.TestCase):
+    def test_activity_log_flag_controls_prompt_and_tool(self):
+        with patch.object(config, "ENABLE_ACTIVITY_LOG", True):
+            prompt = config.build_system_prompt()
+            tools = config.get_tool_definitions()
+        self.assertIn("AK / working at computer", prompt)
+        self.assertIn("AFK / eating", prompt)
+        self.assertIn(
+            "list_activity", {tool["function"]["name"] for tool in tools}
+        )
+
+        with patch.object(config, "ENABLE_ACTIVITY_LOG", False):
+            prompt = config.build_system_prompt()
+            tools = config.get_tool_definitions()
+        self.assertNotIn("ACTIVITY TRACKING", prompt)
+        self.assertNotIn(
+            "list_activity", {tool["function"]["name"] for tool in tools}
+        )
+
     def test_web_search_disabled_removes_mcp_prompt(self):
         with patch.object(config, "ENABLE_WEB_SEARCH", False):
             prompt = config.build_system_prompt()

@@ -204,10 +204,25 @@ class ChatHTTPTests(unittest.TestCase):
         self.assertIn('type="importmap"', html)
         self.assertIn('accept="image/png,image/jpeg,image/webp"', html)
         self.assertIn("Attach static images (PNG, JPEG, or WebP)", html)
+        self.assertIn('id="activity-state"', html)
         self.assertIn('"supportsImages":true', html)
         self.assertNotIn("image/gif", html)
         self.assertNotIn("__CHAT_ASSET_VERSION__", html)
         self.assertNotIn("__LLM_SUPPORTS_IMAGES__", html)
+
+    def test_activity_state_is_published_with_chat_snapshots(self):
+        state = ChatUIState(activity_enabled=True)
+        initial_revision = state.snapshot()["event_revision"]
+        state.set_activity({
+            "presence": "AFK",
+            "activity": "eating",
+            "last_observed_at": 123.0,
+        })
+        snapshot = state.snapshot()
+        self.assertEqual(snapshot["event_revision"], initial_revision + 1)
+        self.assertEqual(snapshot["activity"]["presence"], "AFK")
+        self.assertEqual(snapshot["activity"]["activity"], "eating")
+        self.assertEqual(snapshot["activity"]["observed_at"], 123.0)
 
     def test_text_only_model_rejects_images_and_disables_them_in_ui_config(self):
         raw = b"\x89PNG\r\n\x1a\n" + b"\x00" * 20
@@ -382,6 +397,7 @@ class ChatHTTPTests(unittest.TestCase):
         self.assertTrue(assistant_ids[0].endswith(":assistant:0"))
         self.assertTrue(assistant_ids[1].endswith(":assistant:1"))
         self.assertIn("agent", payload)
+        self.assertIn("activity", payload)
         self.assertIn("chat_revision", payload)
 
     def test_static_assets_are_authenticated_and_versioned(self):
@@ -472,6 +488,7 @@ class ChatHTTPTests(unittest.TestCase):
         self.assertEqual(read_event(), "retry: 2000\n")
         initial = read_event()
         self.assertIn("event: snapshot", initial)
+        self.assertIn('"activity":', initial)
         self.assertNotIn("id:", initial)
 
         self.orch.ui_state.set_agent("acting", "testing events")

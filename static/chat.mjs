@@ -2,6 +2,7 @@ import {
   CHAT_COLOR_PALETTES,
   contrastingTextColor,
   formatAgentState,
+  formatActivityState,
   menuItems,
   mutationDisabled,
   nextTakeover,
@@ -13,6 +14,7 @@ import {
 const config=JSON.parse(document.getElementById('chat-config').textContent);
 const messagesDiv=document.getElementById('messages');
 const modeChip=document.getElementById('agent-mode');
+const activityChip=document.getElementById('activity-state');
 const banner=document.getElementById('status-banner');
 const takeoverText=document.getElementById('takeover-text');
 const ring=document.querySelector('.ring-progress');
@@ -40,7 +42,9 @@ const messageNodes=new Map();
 let messagesById=new Map();
 let orderedMessages=[];
 let agentState={mode:'offline',detail:'',locks_input:false};
+let activityState={enabled:true,presence:null,activity:null,observed_at:null,revision:0};
 let agentServerId=null;
+let activityServerId=null;
 let offline=true;
 let chatRevision=null;
 let selectedFiles=[];
@@ -308,6 +312,26 @@ function applyAgentState(agent,{isOffline=false,serverId=null}={}){
   menu.querySelectorAll('button[data-action]').forEach(button=>{
     button.disabled=mutationDisabled(button.dataset.action,locked);
   });
+}
+
+function applyActivityState(nextState,{serverId=null}={}){
+  if(nextState){
+    if(!shouldApplyAgentSnapshot(
+      activityState.revision,
+      activityServerId,
+      nextState.revision,
+      serverId,
+    ))return;
+    activityState=nextState;
+    if(serverId)activityServerId=serverId;
+  }
+  const text=formatActivityState(activityState);
+  activityChip.hidden=!activityState?.enabled;
+  activityChip.textContent=text||'activity unknown';
+  activityChip.className=activityState?.presence?.toLowerCase()||'unknown';
+  activityChip.title=activityState?.observed_at
+    ?`Last camera observation: ${new Date(activityState.observed_at*1000).toLocaleString()}`
+    :'No classified camera observation yet';
 }
 
 function closeMenu(){
@@ -697,6 +721,7 @@ async function refresh(){
       const data=await responseJSON(response);
       chatRevision=data.chat_revision;
       applyAgentState(data.agent,{isOffline:false,serverId:data.server_id});
+      applyActivityState(data.activity,{serverId:data.server_id});
       reconcileMessages(data.messages||[]);
       return data;
     }catch(error){
@@ -731,6 +756,7 @@ function connectEvents(){
         isOffline:false,
         serverId:snapshot.server_id,
       });
+      applyActivityState(snapshot.activity,{serverId:snapshot.server_id});
       if(snapshot.chat_revision!==chatRevision)refresh().catch(()=>{});
     }catch(error){}
   });

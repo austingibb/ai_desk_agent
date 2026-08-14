@@ -16,6 +16,7 @@ user_data/
 drinks.json
 pomodoros.json
 pomodoro.json
+activity.json
 *.md
 !README.md
 !CLAUDE.md

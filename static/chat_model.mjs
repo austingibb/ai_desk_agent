@@ -8,6 +8,23 @@ export function formatAgentState(agent, offline=false){
   return mode;
 }
 
+export function formatActivityState(state){
+  if(!state?.enabled)return '';
+  const presence=state?.presence;
+  const labels={
+    working_at_computer:'working at computer',
+    out:'out',
+    relaxing:'relaxing',
+    sleeping:'sleeping',
+    eating:'eating',
+    exercising:'exercising',
+    chores:'chores',
+  };
+  const activity=labels[state?.activity];
+  if(!presence||!activity)return 'activity unknown';
+  return `${presence} · ${activity}`;
+}
+
 export function menuItems(message){
   if(message?.role==='user'&&message?.queued)return ['undo','edit','copy'];
   return ['copy'];

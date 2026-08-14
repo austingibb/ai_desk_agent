@@ -24,6 +24,7 @@ Orchestrator (main.py): Pi 5, or any single machine in chat-only mode
 ├── reolink.py        → optional network security camera (snapshot, IR, spotlight)
 ├── mcp_client.py     → Brave Search MCP (JSON-RPC over SSE/HTTP)
 ├── notifications.py  → proposals, approval/rejection, decay scoring, reviews
+├── activity.py       → camera-derived AK/AFK segments, persisted for 90 days
 ├── caffeine.py       → DrinkStore, append-only drinks.json, 30-day retention
 ├── pomodoro.py       → PomodoroStore, append-only pomodoros.json, never pruned
 ├── presence.py       → ActiveTracker, at-desk boolean from motion/chat/buttons
@@ -107,8 +108,9 @@ there is no unconditional capture timer.
 3. `_do_vision_capture()` describes via `VisionClient.describe()`, retrying up to
    3 times on empty output (the vision model intermittently returns nothing)
 4. Cache into `self.latest_scene` under `scene_lock`
-5. Append to the description log, save a debug JPEG (24h rolling window)
-6. `CHILL_TIMEOUT` (300s) with no motion drops back to `chill`, where no frames are
+5. Classify and persist the current AK/AFK activity, then publish it over chat SSE
+6. Append to the description log, save a debug JPEG (24h rolling window)
+7. `CHILL_TIMEOUT` (300s) with no motion drops back to `chill`, where no frames are
    described at all until something moves
 
 ## Key files
@@ -125,6 +127,7 @@ there is no unconditional capture timer.
 | `vision_history.py` | `VisionRequestHistory` (nested git) + `VisionDescriptionLog` (JSONL) |
 | `reolink.py` | `ReoLinkCamera`. Snapshot, IR, spotlight over HTTP |
 | `notifications.py` | Proposals, approval/rejection, decay scoring, review summaries |
+| `activity.py` | `ActivityStore`. Camera-derived activity.json, 90-day retention |
 | `caffeine.py` | `DrinkStore`. drinks.json, pruned to 30 days |
 | `pomodoro.py` | `PomodoroStore`. pomodoros.json, local-timezone stats and streaks |
 | `presence.py` | `ActiveTracker`. At-desk boolean, debounced |
@@ -135,7 +138,7 @@ there is no unconditional capture timer.
 | `display.py` | E-ink driver |
 | `buttons.py` | GPIO reading via gpiod v2 |
 
-Runtime state lives in `context.json`, `notifications.json`, `drinks.json`,
+Runtime state lives in `context.json`, `notifications.json`, `activity.json`, `drinks.json`,
 `pomodoros.json`, `user_data/`, `debug_images/`, `vision_logs/`, and
 `requests_for_image_model/`. All are git-ignored.
 
@@ -150,13 +153,15 @@ Defined in `config.py:TOOL_DEFINITIONS`, dispatched in `main.py._dispatch_tool()
 | Output | `update_display`, `send_chat_message` |
 | Pacing | `wait` |
 | Notifications | `propose_notification`, `resolve_notification_proposal`, `schedule_notification`, `delete_notification` |
+| Activity | `list_activity` |
 | Caffeine | `log_drink`, `list_drinks`, `edit_drink` |
 | Pomodoro | `log_pomodoro`, `list_pomodoros`, `edit_pomodoro`, `pomodoro_stats`, `enter_pomodoro_mode`, `exit_pomodoro_mode` |
 | Search (MCP) | `brave_web_search`, `brave_local_search`, `brave_image_search`, `brave_video_search`, `brave_news_search`, `brave_summarizer` |
 
 `get_tool_definitions()` filters by flag: `CAMERA_TOOL_NAMES` drop out when
 `ENABLE_CAMERA=0`, `REOLINK_TOOL_NAMES` when `ENABLE_REOLINK=0`, and
-`SMART_NOTIFICATION_TOOL_NAMES` outside `smart` approval mode. `build_system_prompt()`
+`SMART_NOTIFICATION_TOOL_NAMES` outside `smart` approval mode, and
+`ACTIVITY_TOOL_NAMES` when `ENABLE_ACTIVITY_LOG=0`. `build_system_prompt()`
 drops the matching prose so the prompt never describes a tool that isn't offered.
 
 The agent converts drink names to mg using a reference table in the system prompt.
@@ -169,6 +174,12 @@ write and say so in their result.
 `ENABLE_DISPLAY`, `ENABLE_CAMERA`, `ENABLE_TTS`, `ENABLE_REOLINK`,
 `ENABLE_WEB_SEARCH`, and `ENABLE_STATUS_PUBLISH` are independent, so a laptop can
 run camera-on/display-off, or chat-only with everything else off.
+
+`ENABLE_ACTIVITY_LOG` independently controls the automatic timeline, its
+`list_activity` tool, and the chat header indicator. Activity is inferred only
+from successful main-camera descriptions, never from chat text. The valid states
+are `AK / working_at_computer` and `AFK / out|relaxing|sleeping|eating|exercising|chores`;
+the harness owns all writes and the brain has read-only access.
 
 `ENABLE_DISPLAY=0` (chat-only mode) changes:
 
@@ -228,7 +239,8 @@ Web UI on `:8080`, password login with a session cookie, optional HTTPS.
 | `GET /static/<asset>` | Chat assets, cache-busted by `_chat_asset_version()` |
 
 `ChatUIState` holds the agent mode indicator (`thinking`, plus the `TOOL_LABELS`
-string for the running tool) and a revision counter. SSE clients long-poll on the
+string for the running tool), current activity indicator, and revision counters.
+SSE clients long-poll on the
 revision with heartbeats; limits are `CHAT_SSE_MAX_STREAMS`,
 `CHAT_SSE_HEARTBEAT_SECONDS`, `CHAT_SSE_IDLE_SECONDS`.
 

@@ -5,6 +5,7 @@ import {
   CHAT_COLOR_PALETTES,
   contrastingTextColor,
   formatAgentState,
+  formatActivityState,
   menuItems,
   mutationDisabled,
   nextTakeover,
@@ -20,6 +21,17 @@ test('formats every agent mode and raw fallback detail',()=>{
   assert.equal(formatAgentState({mode:'acting_long',detail:'capturing'}),'acting (long) (capturing)');
   assert.equal(formatAgentState({mode:'blocked',detail:'compacting memory'}),'blocked (compacting memory)');
   assert.equal(formatAgentState({mode:'thinking'},true),'offline');
+});
+
+test('formats hierarchical activity state for the header chip',()=>{
+  assert.equal(formatActivityState({enabled:true}), 'activity unknown');
+  assert.equal(formatActivityState({
+    enabled:true,presence:'AK',activity:'working_at_computer',
+  }),'AK · working at computer');
+  assert.equal(formatActivityState({
+    enabled:true,presence:'AFK',activity:'eating',
+  }),'AFK · eating');
+  assert.equal(formatActivityState({enabled:false}), '');
 });
 
 test('menu contents follow role and queue state',()=>{
