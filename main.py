@@ -62,6 +62,10 @@ from config import (
     SCENE_MAX_STALE_SECONDS,
     ENABLE_REOLINK,
     ENABLE_WEB_SEARCH,
+    ENABLE_AUX_AGENTS,
+    AUX_AGENTS_FILE,
+    AUX_AGENT_LOG_FILE,
+    AUXILIARY_FORBIDDEN_TOOL_NAMES,
     REOLINK_IP,
     REOLINK_USER,
     REOLINK_PASSWORD,
@@ -88,6 +92,7 @@ from chat_media import (
 )
 from reolink import ReoLinkCamera
 from mcp_client import MCPClient
+from aux_agents import load_auxiliary_manager
 from sounds import play as play_sound
 from tts import speak as tts_speak, interrupt as tts_interrupt
 import logger
@@ -383,6 +388,25 @@ class Orchestrator:
         else:
             info("[MCP] Web search disabled (ENABLE_WEB_SEARCH=0)")
 
+        self.web_search_available = ENABLE_WEB_SEARCH and bool(self.mcp_tools)
+        active_tool_definitions = list(get_tool_definitions())
+        active_tool_definitions.extend(self.mcp_tools)
+        self.aux_agents = load_auxiliary_manager(
+            enabled=ENABLE_AUX_AGENTS,
+            config_path=AUX_AGENTS_FILE,
+            tool_definitions=active_tool_definitions,
+            registered_tool_names=set(TOOL_LABELS),
+            forbidden_tool_names=AUXILIARY_FORBIDDEN_TOOL_NAMES,
+            log_path=AUX_AGENT_LOG_FILE,
+            max_tool_calls_per_turn=MAX_TOOL_CALLS_PER_TURN,
+        )
+        if self.aux_agents:
+            configured = ", ".join(
+                f"{agent.name} ({', '.join(agent.tools)})"
+                for agent in self.aux_agents.agents
+            )
+            info(f"[AUX] Configured auxiliary agents: {configured}")
+
         signal.signal(signal.SIGINT, self._handle_signal)
         signal.signal(signal.SIGTERM, self._handle_signal)
 
@@ -562,7 +586,9 @@ class Orchestrator:
             if self.ctx.load():
                 info("Resuming from saved context.")
                 # Always refresh system prompt to pick up changes
-                prompt = build_system_prompt()
+                prompt = build_system_prompt(
+                    web_search_available=self.web_search_available
+                )
                 if self.ctx.messages and self.ctx.messages[0].get("role") == "system":
                     self.ctx.messages[0]["content"] = prompt
                     info("[CONTEXT] Refreshed system prompt in loaded context.")
@@ -574,7 +600,11 @@ class Orchestrator:
                 else:
                     self.ctx.add_user("A restart just occurred. Camera is not available — resume where you left off.")
             else:
-                self.ctx.add_system(build_system_prompt())
+                self.ctx.add_system(
+                    build_system_prompt(
+                        web_search_available=self.web_search_available
+                    )
+                )
                 if ENABLE_CAMERA:
                     self.ctx.add_user("You just woke up! Use take_photo to see the room and say hi.")
                 else:
@@ -609,7 +639,6 @@ class Orchestrator:
                 messages = self.ctx.get_messages()
                 msg_tokens = self.ctx.total_tokens()
             reminder = self._build_turn_reminder()
-            messages.append({"role": "user", "content": reminder})
             estimated = msg_tokens + estimate_tool_tokens(tools) + len(reminder) // 4
             if estimated > LLM_ESTIMATED_MAX_TOKENS:
                 info(f"[LLM] Token estimate {estimated} exceeds limit {LLM_ESTIMATED_MAX_TOKENS}, compacting...")
@@ -623,58 +652,129 @@ class Orchestrator:
                     messages = self.ctx.get_messages()
                     msg_tokens = self.ctx.total_tokens()
                 reminder = self._build_turn_reminder()
-                messages.append({"role": "user", "content": reminder})
                 estimated = msg_tokens + estimate_tool_tokens(tools) + len(reminder) // 4
                 info(f"[LLM] After compaction: ~{msg_tokens} msg tokens + {estimate_tool_tokens(tools)} tool tokens = ~{estimated} total")
-            info(f"[LLM] Sending {len(messages)} messages (~{msg_tokens} msg tokens, ~{estimate_tool_tokens(tools)} tool tokens, ~{estimated} total)...")
-            play_sound("thinking")
-            self._set_agent_state("thinking")
-            try:
-                response = self.ai.chat_with_tools(messages, tools)
-            except LLMError as e:
-                recoverable = e.status_code >= 500 or e.status_code == 429
-                err_str = str(e)
-                if "exceed_context_size_error" in err_str or "exceeds the available context size" in err_str:
-                    info(f"[LLM] Context overflow detected, triggering compaction...")
+            response = None
+            auxiliary_turn = None
+            auxiliary_agent_name = None
+            if self.aux_agents:
+                play_sound("thinking")
+                self._set_agent_state("thinking")
+                routing_messages = list(messages)
+                routing_messages.append({"role": "user", "content": reminder})
+                try:
+                    auxiliary_turn = self.aux_agents.evaluate(
+                        routing_messages,
+                        tools,
+                    )
+                    response = auxiliary_turn.response
+                    auxiliary_agent_name = auxiliary_turn.agent_name
+                except Exception as error:
+                    # Endpoint and protocol failures are normally isolated inside
+                    # the manager. Preserve hosted-brain availability even if an
+                    # unexpected auxiliary-layer error escapes that boundary.
+                    info(f"[AUX WARNING] Routing failed: {error}; using hosted brain")
+
+            if response is None:
+                hosted_reminder = reminder
+                if auxiliary_turn and auxiliary_turn.escalation_packet:
+                    hosted_reminder = self.aux_agents.append_escalation_to_reminder(
+                        reminder,
+                        auxiliary_turn.escalation_packet,
+                    )
+                hosted_messages = list(messages)
+                hosted_messages.append({"role": "user", "content": hosted_reminder})
+                hosted_estimated = (
+                    msg_tokens
+                    + estimate_tool_tokens(tools)
+                    + len(hosted_reminder) // 4
+                )
+                if hosted_estimated > LLM_ESTIMATED_MAX_TOKENS:
+                    info(
+                        f"[LLM] Escalation packet raised token estimate to "
+                        f"{hosted_estimated}; compacting before hosted fallback..."
+                    )
                     with self._blocked_agent_state("compacting memory", True):
                         try:
                             self.ctx.check_compact(self.ai, self.ctx_lock)
-                        except LLMError as ce:
-                            info(f"[LLM] Compaction failed during overflow: {ce}")
+                        except LLMError as error:
+                            info(
+                                "[LLM] Compaction failed before hosted fallback: "
+                                f"{error}"
+                            )
                     self.ui_state.chat_changed()
-                    time.sleep(1)
-                    continue
-                if not recoverable:
-                    info(f"[LLM] Non-recoverable error (HTTP {e.status_code}), backing off: {e}")
+                    with self.ctx_lock:
+                        messages = self.ctx.get_messages()
+                        msg_tokens = self.ctx.total_tokens()
+                    hosted_messages = list(messages)
+                    hosted_messages.append(
+                        {"role": "user", "content": hosted_reminder}
+                    )
+                    hosted_estimated = (
+                        msg_tokens
+                        + estimate_tool_tokens(tools)
+                        + len(hosted_reminder) // 4
+                    )
+                info(
+                    f"[LLM] Sending {len(hosted_messages)} messages "
+                    f"(~{msg_tokens} msg tokens, ~{estimate_tool_tokens(tools)} "
+                    f"tool tokens, ~{hosted_estimated} total)..."
+                )
+                if not self.aux_agents:
+                    # Preserve the pre-delegation ordering in the no-config path.
+                    play_sound("thinking")
+                    self._set_agent_state("thinking")
+                try:
+                    response = self.ai.chat_with_tools(hosted_messages, tools)
+                except LLMError as e:
+                    recoverable = e.status_code >= 500 or e.status_code == 429
+                    err_str = str(e)
+                    if "exceed_context_size_error" in err_str or "exceeds the available context size" in err_str:
+                        info(f"[LLM] Context overflow detected, triggering compaction...")
+                        with self._blocked_agent_state("compacting memory", True):
+                            try:
+                                self.ctx.check_compact(self.ai, self.ctx_lock)
+                            except LLMError as ce:
+                                info(f"[LLM] Compaction failed during overflow: {ce}")
+                        self.ui_state.chat_changed()
+                        time.sleep(1)
+                        continue
+                    if not recoverable:
+                        info(f"[LLM] Non-recoverable error (HTTP {e.status_code}), backing off: {e}")
+                        self._llm_failures += 1
+                        self._last_llm_fail = time.time()
+                        delay = self._llm_backoff_seconds()
+                        info(f"[LLM] Backing off for {delay}s ({self._llm_failures} consecutive failures)")
+                        self._display_error(f"LLM API error ({e.status_code}). Retrying in {delay // 60}m...")
+                        self._llm_backoff_sleep(delay)
+                        continue
+                    else:
+                        info(f"[LLM] Recoverable error (HTTP {e.status_code}), backing off: {e}")
+                        self._llm_failures += 1
+                        self._last_llm_fail = time.time()
+                        delay = min(self._llm_backoff_seconds(), 120)  # cap transient retries at 2min
+                        info(f"[LLM] Backing off for {delay}s ({self._llm_failures} consecutive failures)")
+                        self._llm_backoff_sleep(delay)
+                        continue
+                except (requests.Timeout, requests.ConnectionError) as e:
+                    info(f"[LLM] Network error: {e}")
                     self._llm_failures += 1
                     self._last_llm_fail = time.time()
-                    delay = self._llm_backoff_seconds()
-                    info(f"[LLM] Backing off for {delay}s ({self._llm_failures} consecutive failures)")
-                    self._display_error(f"LLM API error ({e.status_code}). Retrying in {delay // 60}m...")
+                    delay = min(self._llm_backoff_seconds(), 120)
+                    info(f"[LLM] Backing off for {delay}s")
                     self._llm_backoff_sleep(delay)
                     continue
-                else:
-                    info(f"[LLM] Recoverable error (HTTP {e.status_code}), backing off: {e}")
+                except Exception as e:
+                    info(f"[LLM] Unexpected error: {e}")
                     self._llm_failures += 1
                     self._last_llm_fail = time.time()
-                    delay = min(self._llm_backoff_seconds(), 120)  # cap transient retries at 2min
-                    info(f"[LLM] Backing off for {delay}s ({self._llm_failures} consecutive failures)")
-                    self._llm_backoff_sleep(delay)
+                    self._llm_backoff_sleep(5)
                     continue
-            except (requests.Timeout, requests.ConnectionError) as e:
-                info(f"[LLM] Network error: {e}")
-                self._llm_failures += 1
-                self._last_llm_fail = time.time()
-                delay = min(self._llm_backoff_seconds(), 120)
-                info(f"[LLM] Backing off for {delay}s")
-                self._llm_backoff_sleep(delay)
-                continue
-            except Exception as e:
-                info(f"[LLM] Unexpected error: {e}")
-                self._llm_failures += 1
-                self._last_llm_fail = time.time()
-                self._llm_backoff_sleep(5)
-                continue
+            else:
+                info(
+                    f"[AUX] {auxiliary_agent_name} selected "
+                    f"{len(response['tool_calls'])} tool call(s)"
+                )
 
             self._llm_failures = 0
 
@@ -711,7 +811,17 @@ class Orchestrator:
                 self._idle_wait()
                 return
 
-            self._execute_tool_batch(response["tool_calls"])
+            if auxiliary_agent_name:
+                execution_records = self._execute_tool_batch(
+                    response["tool_calls"],
+                    record_results=True,
+                )
+                self.aux_agents.record_tool_results(
+                    auxiliary_agent_name,
+                    execution_records,
+                )
+            else:
+                self._execute_tool_batch(response["tool_calls"])
 
             try:
                 with self.ctx_lock:
@@ -737,9 +847,15 @@ class Orchestrator:
             except LLMError as e:
                 info(f"[LLM] Compaction failed: {e}")
 
-    def _execute_tool_batch(self, tool_calls: list[dict]):
+    def _execute_tool_batch(
+        self,
+        tool_calls: list[dict],
+        *,
+        record_results: bool = False,
+    ):
         """Execute a complete model-emitted batch, then honor a wait sweep."""
         deferred_user_msgs = []
+        execution_records = [] if record_results else None
         saw_wait = False
 
         for tool_call in tool_calls:
@@ -759,6 +875,13 @@ class Orchestrator:
             info(f"[TOOL RESULT] {json.dumps(result)}")
             with self.ctx_lock:
                 self.ctx.add_tool_result(tool_call["id"], name, result)
+            if execution_records is not None:
+                execution_records.append({
+                    "id": tool_call["id"],
+                    "name": name,
+                    "arguments": copy.deepcopy(tool_call["arguments"]),
+                    "result": copy.deepcopy(result),
+                })
             user_message = result.get("user_message")
             if user_message:
                 deferred_user_msgs.append(user_message)
@@ -772,6 +895,7 @@ class Orchestrator:
         # real result has closed the assistant/tool pairing.
         if saw_wait:
             self._sweep_chat_queue()
+        return execution_records
 
     def _llm_backoff_seconds(self) -> int:
         n = max(self._llm_failures - 1, 0)

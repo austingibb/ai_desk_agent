@@ -91,7 +91,13 @@ A shared lock allows only one vision inference at a time, so an on-demand captur
 
 ## How it works
 
-Two models split the work. A hosted brain (DeepSeek V4 Flash on OpenRouter by default) does the reasoning, tool calling, conversation, and decisions. A local vision model does room perception, and nothing else: a background thread captures frames when motion warrants it and caches the description, so the brain's `take_photo` tool returns instantly.
+A hosted brain (DeepSeek V4 Flash on OpenRouter by default) owns conversation,
+judgment, and every user-facing decision. A local vision model does room
+perception: a background thread captures frames when motion warrants it and
+caches the description, so the brain's `take_photo` tool returns without
+starting a new capture. Optional auxiliary text agents can handle explicitly
+whitelisted mechanical tools while the hosted brain retains access to the full
+runtime tool set.
 
 ### Why the eyes are local
 
@@ -117,6 +123,59 @@ The brain runs an autonomous loop with no timers or hardcoded behaviors:
 4. Repeat
 
 When nothing is happening it idles. A chat message or button press wakes it. It paces itself, backing off when ignored and engaging more during conversation.
+
+### Auxiliary agents (optional)
+
+Auxiliary agents are OpenAI-compatible text endpoints configured in
+`aux_agents.json`. At each loop boundary, each agent in file order gets a short
+classification request. If it accepts the event, it gets a private tool-calling
+turn containing only its owned tools. Otherwise the hosted brain receives a
+structured escalation packet and proceeds normally. Overlapping tools belong to
+the first agent in file order.
+
+The feature is enabled by default but inert when the file is absent or its
+`agents` array is empty: there are no extra requests and no auxiliary log file.
+Tool names must exactly match the registry. Known delegatable tools unavailable
+because a feature or startup service is down are removed from an agent's access;
+unknown names fail startup and list the valid names.
+
+```json
+{
+  "schema_version": 1,
+  "agents": [
+    {
+      "name": "secretary",
+      "base_url": "http://127.0.0.1:8090/v1",
+      "model": "<model-id-your-server-reports>",
+      "tools": [
+        "take_photo",
+        "list_activity",
+        "log_drink",
+        "list_drinks",
+        "log_pomodoro",
+        "list_pomodoros",
+        "pomodoro_stats"
+      ],
+      "classification_timeout_seconds": 2.0
+    }
+  ]
+}
+```
+
+`classification_timeout_seconds` is optional and defaults to 2 seconds.
+Authenticated endpoints can name an environment variable with an optional
+`api_key_env` field; its value is sent as a bearer token and is redacted from
+logs. The classifier uses a 200-token response limit and low reasoning effort;
+the substantive private turn uses a 20,000-token response limit and the model's
+normal sampling/reasoning defaults.
+
+Auxiliary output is never shown to the user. Only authorized tool calls enter
+the canonical context. Camera frames are never attached; `take_photo` can only
+read the cached background description, while synchronous capture, chat,
+display, and vision-request tools cannot be delegated. Endpoint failures fall
+back to the hosted brain with exponential retries from 5 seconds to 5 minutes.
+Full request, response, routing, failure, recovery, and tool-result events are
+appended locally to the git-ignored `aux_logs/events.jsonl`.
 
 Conversation history persists across restarts and auto-compacts at 150 messages, summarizing older ones while keeping the last 30 intact. Brave Search is available through MCP when `ENABLE_WEB_SEARCH=1`. When the room is still for 5 minutes the vision loop enters chill mode and stops describing frames until something moves.
 
@@ -160,6 +219,8 @@ Everything is set with environment variables or a `.env` file.
 | `LLM_API_KEY` | _(required)_ | OpenRouter API key |
 | `LLM_MODEL` | `deepseek/deepseek-v4-flash-0731` | Hosted brain model |
 | `LLM_SUPPORTS_IMAGES` | `0` | `1` enables chat image uploads for a compatible brain model |
+| `ENABLE_AUX_AGENTS` | `1` | Load optional auxiliary agents; a missing/empty config is a no-op |
+| `AUX_AGENTS_FILE` | `aux_agents.json` | Auxiliary-agent JSON configuration path |
 | `VISION_PROVIDER` | `generic` | `generic` free-text request, or `aarg_mlx` structured Gemma vision |
 | `VISION_BASE_URL` | provider-specific | Vision server URL |
 | `VISION_MODEL` | provider-specific | Vision model id |

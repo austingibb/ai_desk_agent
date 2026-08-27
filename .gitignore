@@ -10,6 +10,8 @@ venv/
 debug_images/*
 requests_for_image_model/
 vision_logs/
+aux_agents.json
+aux_logs/
 context.json
 notifications.json
 user_data/

@@ -20,6 +20,14 @@ LLM_MAX_TOKENS = 2048
 LLM_MAX_TOKENS_COMPACT = int(os.environ.get("LLM_MAX_TOKENS_COMPACT", "64000"))
 LLM_TIMEOUT = 120
 
+# Optional OpenAI-compatible auxiliary agents.  The default is enabled so
+# placing the config file is sufficient to opt in; a missing file is a no-op.
+ENABLE_AUX_AGENTS = os.environ.get("ENABLE_AUX_AGENTS", "1") == "1"
+AUX_AGENTS_FILE = os.environ.get(
+    "AUX_AGENTS_FILE", os.path.join(PROJECT_DIR, "aux_agents.json")
+)
+AUX_AGENT_LOG_FILE = os.path.join(PROJECT_DIR, "aux_logs", "events.jsonl")
+
 # Vision LLM. ``generic`` preserves the existing llama.cpp/Pi request path;
 # ``aarg_mlx`` uses the structured Gemma 4 service on a Mac.
 VISION_PROVIDER = os.environ.get("VISION_PROVIDER", "generic").strip().lower()
@@ -224,7 +232,9 @@ PIPER_HTTP_URL = os.environ.get("PIPER_HTTP_URL", "http://localhost:5000")
 FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 FONT_REGULAR = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
-def build_system_prompt() -> str:
+def build_system_prompt(web_search_available: bool | None = None) -> str:
+    if web_search_available is None:
+        web_search_available = ENABLE_WEB_SEARCH
     # Output surface depends on whether the e-ink display + buttons exist.
     # ENABLE_DISPLAY=0 → chat-only: display-bound messages go to the web chat,
     # and there are no physical buttons (approvals/nudges happen via chat).
@@ -290,7 +300,7 @@ def build_system_prompt() -> str:
         core_tools = core_tools[2:]  # remove take_photo and capture_photo
         toolkit = "Your own musings, jokes, and observations are always valid."
 
-    if ENABLE_WEB_SEARCH:
+    if web_search_available:
         search_section = (
             "You also have access to Brave Search tools (brave_web_search, brave_local_search, "
             "brave_image_search, brave_video_search, brave_news_search, brave_summarizer). "
@@ -474,7 +484,7 @@ You track Austin's pomodoro focus cycles (25 min work + 5 min break each).
     except FileNotFoundError:
         pass
 
-    if not ENABLE_WEB_SEARCH:
+    if not web_search_available:
         prompt += (
             "\n\n---\n\nRUNTIME CAPABILITY OVERRIDE:\n"
             "Web search is disabled in this runtime and no search tools are available. "
@@ -938,6 +948,11 @@ CAMERA_TOOL_NAMES = {"take_photo", "capture_photo", "update_vision_requests"}
 REOLINK_TOOL_NAMES = {"take_reolink_photo", "flash_camera_light", "flash_ir_light"}
 SMART_NOTIFICATION_TOOL_NAMES = {"resolve_notification_proposal"}
 ACTIVITY_TOOL_NAMES = {"list_activity"}
+AUXILIARY_FORBIDDEN_TOOL_NAMES = (
+    {"update_display", "send_chat_message"}
+    | CAMERA_TOOL_NAMES.difference({"take_photo"})
+    | {"take_reolink_photo"}
+)
 
 def get_tool_definitions() -> list:
     result = list(TOOL_DEFINITIONS)
