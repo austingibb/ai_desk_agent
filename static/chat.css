@@ -162,7 +162,7 @@ body {
 
 #activity-state {
   position: absolute;
-  left: 92px;
+  right: 14px;
   display: inline-flex;
   min-height: 25px;
   max-width: min(32vw, 220px);
@@ -197,7 +197,7 @@ body {
 
 #agent-mode {
   position: absolute;
-  right: 14px;
+  left: 92px;
   display: inline-flex;
   align-items: center;
   min-height: 25px;
