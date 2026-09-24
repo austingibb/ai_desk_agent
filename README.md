@@ -89,6 +89,40 @@ VISION_MAX_TOKENS=350
 
 A shared lock allows only one vision inference at a time, so an on-demand capture can't overlap the background loop.
 
+### Multiple cameras
+
+Both the local camera (`main_camera`) and Reolink (`reolink`) default to `cache`
+mode. Each keeps its latest JPEG and vision description in memory, refreshes at
+`VISION_POLL_INTERVAL`, and sends camera-labeled descriptions to the AI. Local
+motion detection can trigger an earlier refresh after a quiet period. Failed
+refreshes retain the last successful cache; tool results include its age.
+
+Set `CAMERA_MODE=poll_only` or `REOLINK_MODE=poll_only` to capture only when the AI
+requests that camera. Poll-only cameras have no background worker or image cache.
+`take_photo(camera_id=...)` follows the selected mode;
+`capture_photo(camera_id=...)` always takes a fresh photo. Omitting `camera_id`
+selects the first configured camera. `take_reolink_photo` remains an alias for
+reading the first Reolink camera in its configured mode.
+
+To configure any number of cameras, set `CAMERAS_JSON` in `.env`, for example:
+
+```dotenv
+CAMERAS_JSON='[{"id":"desk","type":"local","mode":"cache","interval":180},{"id":"room","type":"reolink","mode":"cache","interval":180,"ip":"192.168.2.101","password_env":"REOLINK_PASSWORD"}]'
+```
+
+This registry replaces `ENABLE_CAMERA` / `ENABLE_REOLINK`; `[]` disables all
+cameras. Every entry needs a unique `id` and `type` (`local` or `reolink`). `mode`
+defaults to `cache`, and `interval` defaults to `VISION_POLL_INTERVAL` (seconds
+between completed refresh attempts). Local entries accept `backend` and
+`device_index`; Reolink entries accept `ip`, `user`, `password_env`, and `timeout`,
+with the existing environment settings as defaults. Reolink works with the local
+camera disabled. IR and spotlight tools control the first Reolink camera.
+
+Vision inference is serialized across cameras. Pending updates preserve each
+viewpoint, and debug JPEG filenames include the camera ID. The activity timeline
+uses the first configured camera. Two cached cameras are a reasonable starting
+point; managing AI input volume for larger camera counts is not implemented.
+
 ## How it works
 
 A hosted brain (DeepSeek V4 Flash on OpenRouter by default) owns conversation,
@@ -232,8 +266,8 @@ Everything is set with environment variables or a `.env` file.
 | `ACTIVITY_LOG_FILE` | `activity.json` | Local timeline state file |
 | `ACTIVITY_RETENTION_SECONDS` | `7776000` | Keep closed activity segments for 90 days |
 | `ENABLE_DISPLAY` | `1` | `0` = chat-only mode (no e-ink, no GPIO) |
-| `ENABLE_CAMERA` | `1` | `0` disables the camera and all vision tools |
-| `ENABLE_REOLINK` | `1` | `0` disables the network security-camera tools |
+| `ENABLE_CAMERA` | `1` | `0` disables the local camera (unless CAMERAS_JSON is set) |
+| `ENABLE_REOLINK` | `1` | `0` disables the Reolink camera (unless CAMERAS_JSON is set) |
 | `ENABLE_TTS` | `0` | `1` enables Piper TTS |
 | `ENABLE_WEB_SEARCH` | `1` | `0` runs without the Brave Search MCP server |
 | `MCP_URL` | `http://localhost:8089/mcp` | Brave Search MCP endpoint |

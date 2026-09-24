@@ -389,7 +389,7 @@ class OrchestratorRoutingTests(unittest.TestCase):
         orchestrator.ctx_lock = threading.Lock()
         orchestrator.ai = Mock()
         orchestrator.ui_state = Mock()
-        orchestrator.vision_mode = "chill"
+        orchestrator.cameras = Mock(motion_active=False)
         orchestrator._llm_failures = 0
         orchestrator._build_turn_reminder = lambda: "CURRENT BOUNDARY"
         orchestrator._set_agent_state = lambda *args, **kwargs: None

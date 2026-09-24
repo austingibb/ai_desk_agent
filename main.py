@@ -19,6 +19,7 @@ from socketserver import ThreadingMixIn
 import requests
 from config import (
     PROJECT_DIR,
+    camera_settings,
     DISPLAY_SERVER_URL,
     build_system_prompt,
     get_tool_definitions,
@@ -54,7 +55,6 @@ from config import (
     ENABLE_ACTIVITY_LOG,
     VISION_PROVIDER,
     VISION_REQUESTS_GUIDANCE,
-    VISION_POLL_INTERVAL,
     MOTION_POLL_INTERVAL,
     CHILL_TIMEOUT,
     SCENE_RMS_THRESHOLD,
@@ -68,7 +68,6 @@ from config import (
     AUXILIARY_FORBIDDEN_TOOL_NAMES,
     REOLINK_IP,
     REOLINK_USER,
-    REOLINK_PASSWORD,
     REOLINK_TIMEOUT,
     POMODORO_WORK_MINUTES,
     POMODORO_IDLE_EXIT_SECONDS,
@@ -90,6 +89,7 @@ from chat_media import (
     queued_message_payload,
     update_queued_text,
 )
+from camera_manager import CameraFeed, CameraManager
 from reolink import ReoLinkCamera
 from mcp_client import MCPClient
 from aux_agents import load_auxiliary_manager
@@ -273,7 +273,8 @@ class ChatUIState:
 class Orchestrator:
     def __init__(self):
         self.ctx = Context()
-        if ENABLE_CAMERA:
+        self.camera_configs = camera_settings(ENABLE_CAMERA, ENABLE_REOLINK)
+        if self.camera_configs:
             self.vision_request_history = VisionRequestHistory()
             self.vision_description_log = VisionDescriptionLog()
             info(
@@ -284,20 +285,30 @@ class Orchestrator:
         else:
             self.vision_request_history = None
             self.vision_description_log = None
-        # Import camera dependencies lazily so camera-off chat mode stays light.
-        # Camera itself selects picamera2 on Pi and OpenCV on macOS.
-        if ENABLE_CAMERA:
-            from camera import Camera
-            self.camera = Camera()
-        else:
-            self.camera = None
+        feeds = []
+        self.reolink = None
+        self.reolink_id = None
+        for settings in self.camera_configs:
+            if settings["type"] == "local":
+                from camera import Camera
+                from config import CAMERA_DEVICE_INDEX
+                device = Camera(backend=settings.get("backend"),
+                                device_index=settings.get("device_index", CAMERA_DEVICE_INDEX))
+            else:
+                device = ReoLinkCamera(
+                    settings.get("ip", REOLINK_IP), settings.get("user", REOLINK_USER),
+                    os.environ.get(settings.get("password_env", "REOLINK_PASSWORD"), ""),
+                    settings.get("timeout", REOLINK_TIMEOUT),
+                )
+                if self.reolink is None:
+                    self.reolink = device
+                    self.reolink_id = settings["id"]
+            feeds.append(CameraFeed(settings["id"], device, settings["mode"], settings["interval"]))
         self.ai = AIClient()
         self.vision = (
             VisionClient(self.vision_request_history, self.vision_description_log)
-            if ENABLE_CAMERA
-            else None
+            if feeds else None
         )
-        self.reolink = ReoLinkCamera(REOLINK_IP, REOLINK_USER, REOLINK_PASSWORD, REOLINK_TIMEOUT) if ENABLE_REOLINK else None
         self.running = True
         self.last_display_time = 0
         self.chat_event = threading.Event()
@@ -338,24 +349,25 @@ class Orchestrator:
         self._llm_failures = 0
         self._last_llm_fail = 0.0
 
-        # Vision background thread state
-        self.latest_scene = None  # description, timestamp, and vision request commit
-        self.scene_lock = threading.Lock()
-        # Acquire before capture so a request waiting behind another inference
-        # takes a fresh frame instead of eventually submitting a stale one.
-        self.vision_job_lock = threading.Lock()
+        # Background updates are keyed by viewpoint so simultaneous captures
+        # cannot overwrite another camera's pending observation.
         self.motion_event = threading.Event()
-        self.motion_description = ""
-        if ENABLE_CAMERA:
+        self.pending_scenes = {}
+        self.scene_lock = threading.Lock()
+        detector_factory = None
+        if any(c["type"] == "local" and c["mode"] == "cache" for c in self.camera_configs):
             from scene_change import SceneChangeDetector
-            self.scene_detector = SceneChangeDetector(
+            detector_factory = lambda: SceneChangeDetector(
                 rms_threshold=SCENE_RMS_THRESHOLD,
                 pct_threshold=SCENE_PCT_THRESHOLD,
                 max_stale_seconds=SCENE_MAX_STALE_SECONDS,
             )
-        else:
-            self.scene_detector = None
-        self.vision_mode = "chill"  # "chill" when no motion, "active" when motion detected
+        self.cameras = CameraManager(
+            feeds, self.vision, on_scene=self._camera_scene_updated,
+            on_motion=self._camera_motion_detected, save_image=self._save_debug_image,
+            motion_interval=MOTION_POLL_INTERVAL, chill_timeout=CHILL_TIMEOUT,
+            detector_factory=detector_factory,
+        )
         self.vision_requests_shown = False  # tracks if we've shown existing requests this turn
 
         # Chat auth — persist session token across restarts
@@ -568,10 +580,8 @@ class Orchestrator:
         return context_id
 
     def run(self):
-        if self.camera:
-            info(f"Init camera ({self.camera.backend})...")
-        else:
-            info("Camera disabled.")
+        for feed in self.cameras.feeds.values():
+            info(f"Init camera {feed.id} ({feed.mode}, interval={feed.interval:g}s)")
         info(f"Init AI client ({self.ai.model} on OpenRouter)...")
         if self.vision:
             info(f"Init vision client ({self.vision.model} via {self.vision.provider})...")
@@ -580,8 +590,7 @@ class Orchestrator:
                 info(f"[VISION] AARG service is {state} at {self.vision.base_url}")
         self._start_chat_server()
         self.status_publisher.start()
-        if ENABLE_CAMERA:
-            self._start_vision_loop()
+        self.cameras.start()
         with self.ctx_lock:
             if self.ctx.load():
                 info("Resuming from saved context.")
@@ -595,7 +604,7 @@ class Orchestrator:
                 else:
                     self.ctx.messages.insert(0, self.ctx.new_message("system", prompt))
                     info("[CONTEXT] Inserted system prompt into loaded context.")
-                if ENABLE_CAMERA:
+                if self.cameras.feeds:
                     self.ctx.add_user("A restart just occurred. Resume where you left off.")
                 else:
                     self.ctx.add_user("A restart just occurred. Camera is not available — resume where you left off.")
@@ -605,7 +614,7 @@ class Orchestrator:
                         web_search_available=self.web_search_available
                     )
                 )
-                if ENABLE_CAMERA:
+                if self.cameras.feeds:
                     self.ctx.add_user("You just woke up! Use take_photo to see the room and say hi.")
                 else:
                     self.ctx.add_user("You just woke up! Note: camera/vision tools are not available. Use your other tools to say hi.")
@@ -835,7 +844,7 @@ class Orchestrator:
                     self.ctx.check_compact(self.ai, self.ctx_lock)
                 # Only merge summaries when user is away (chill mode) to avoid
                 # blocking the agent loop with back-to-back LLM calls
-                if self.vision_mode == "chill" or not ENABLE_CAMERA:
+                if not self.cameras.motion_active:
                     with self.ctx_lock:
                         will_merge = sum(
                             1 for msg in self.ctx.messages if self.ctx._is_summary(msg)
@@ -926,15 +935,15 @@ class Orchestrator:
 
     def _dispatch_tool(self, name: str, args: dict) -> dict:
         if name == "take_photo":
-            if not ENABLE_CAMERA:
+            if not self.cameras.feeds:
                 return {"error": "Camera is disabled. Use other tools instead."}
             play_sound("take_photo")
-            return self._tool_take_photo()
+            return self._tool_take_photo(args)
         elif name == "capture_photo":
-            if not ENABLE_CAMERA:
+            if not self.cameras.feeds:
                 return {"error": "Camera is disabled. Use other tools instead."}
             play_sound("take_photo")
-            return self._tool_capture_photo()
+            return self._tool_capture_photo(args)
         elif name == "update_display":
             play_sound("update_display")
             return self._tool_update_display(args)
@@ -947,16 +956,16 @@ class Orchestrator:
         elif name == "update_vision_requests":
             return self._tool_update_vision_requests(args)
         elif name == "take_reolink_photo":
-            if not ENABLE_REOLINK:
+            if not self.reolink:
                 return {"error": "Reolink camera is disabled."}
             play_sound("take_photo")
             return self._tool_take_reolink_photo()
         elif name == "flash_ir_light":
-            if not ENABLE_REOLINK:
+            if not self.reolink:
                 return {"error": "Reolink camera is disabled."}
             return self._tool_flash_ir_light(args)
         elif name == "flash_camera_light":
-            if not ENABLE_REOLINK:
+            if not self.reolink:
                 return {"error": "Reolink camera is disabled."}
             return self._tool_flash_camera_light(args)
         elif name == "log_drink":
@@ -997,26 +1006,8 @@ class Orchestrator:
                     return {"error": f"MCP tool '{name}' failed: {e}"}
             return {"error": f"Unknown tool: {name}. Available: take_photo, capture_photo, update_display, wait"}
 
-    def _tool_take_photo(self) -> dict:
-        # Wait up to 90s for the background vision thread to produce a scene
-        for _ in range(90):
-            with self.scene_lock:
-                scene = self.latest_scene
-            if scene and scene.get("description"):
-                break
-            time.sleep(1)
-        else:
-            return {"status": "error", "message": "No scene available yet — vision thread may still be starting"}
-
-        captured_at = time.strftime("%-I:%M%p", time.localtime(scene["timestamp"])).lower().lstrip("0")
-        age = int(time.time() - scene["timestamp"])
-        result = {
-            "status": "ok",
-            "description": scene["description"],
-            "captured_at": captured_at,
-            "age_seconds": age,
-            "vision_request_commit": scene.get("request_commit", ""),
-        }
+    def _tool_take_photo(self, args=None) -> dict:
+        result = self.cameras.read((args or {}).get("camera_id"))
         self._note_stale_vision_requests(result)
         return result
 
@@ -1031,19 +1022,8 @@ class Orchestrator:
             "to rewrite them for the current mode."
         )
 
-    def _tool_capture_photo(self) -> dict:
-        """Take a photo now and block until the vision model describes it."""
-        info("[PHOTO] Synchronous capture + describe (blocking, may take up to 120s)...")
-        scene = self._capture_and_describe(source="main_camera_on_demand")
-        if not scene:
-            return {"status": "error", "message": "Failed to capture or describe photo — vision model may be unavailable"}
-        captured_at = time.strftime("%-I:%M%p", time.localtime(scene["timestamp"])).lower().lstrip("0")
-        result = {
-            "status": "ok",
-            "description": scene["description"],
-            "captured_at": captured_at,
-            "vision_request_commit": scene.get("request_commit", ""),
-        }
+    def _tool_capture_photo(self, args=None) -> dict:
+        result = self.cameras.read((args or {}).get("camera_id"), fresh=True)
         self._note_stale_vision_requests(result)
         return result
 
@@ -1098,36 +1078,9 @@ class Orchestrator:
             return {"status": "error", "message": f"Failed to write requests file: {e}"}
 
     def _tool_take_reolink_photo(self) -> dict:
-        if not self.reolink:
+        if not self.reolink_id:
             return {"status": "error", "message": "Reolink camera not initialized"}
-        if not self.vision:
-            return {"status": "error", "message": "Vision model not available (ENABLE_CAMERA=0)"}
-        info("[REOLINK] Capturing snapshot...")
-        with self.vision_job_lock:
-            try:
-                _, data_uri = self.reolink.capture()
-                captured_at_epoch = time.time()
-            except Exception as e:
-                return {"status": "error", "message": f"Reolink capture failed: {e}"}
-            try:
-                description = self.vision.describe(
-                    data_uri,
-                    source="reolink_security_cam",
-                    captured_at=captured_at_epoch,
-                )
-            except Exception as e:
-                return {"status": "error", "message": f"Vision describe failed: {e}"}
-        if not description:
-            return {"status": "error", "message": "Vision model returned empty description"}
-        captured_at = time.strftime("%-I:%M%p").lower().lstrip("0")
-        info(f"[REOLINK] Scene: {description[:100]}...")
-        return {
-            "status": "ok",
-            "description": description,
-            "captured_at": captured_at,
-            "source": "reolink_security_cam",
-            "vision_request_commit": self.vision.last_request_commit,
-        }
+        return self._tool_take_photo({"camera_id": self.reolink_id})
 
     def _tool_flash_ir_light(self, args: dict) -> dict:
         if not self.reolink:
@@ -1178,42 +1131,32 @@ class Orchestrator:
             return {"status": "ok", "message": f"Light on at {brightness}% — will turn off in {duration}s"}
         return {"status": "ok", "message": f"Light {'on' if on else 'off'} at {brightness}% brightness"}
 
-    def _capture_and_describe(self, source: str = "main_camera") -> dict | None:
-        """Capture a photo and get a text description from the local vision model."""
-        with self.vision_job_lock:
-            try:
-                jpeg_bytes, photo_uri = self.camera.capture()
-                captured_at = time.time()
-            except Exception as e:
-                info(f"[VISION] Camera error: {e}")
-                return None
+    def _camera_motion_detected(self):
+        self.presence.touch()
+        self._note_pomodoro_activity()
 
-            self._save_debug_image(jpeg_bytes)
+    def _camera_scene_updated(self, scene, background):
+        # Keep the existing activity timeline tied to the primary viewpoint;
+        # reconciling conflicting activity observations is a separate concern.
+        if scene["camera_id"] == next(iter(self.cameras.feeds), None):
+            self._record_activity(scene["description"], scene["timestamp"], scene["source"])
+        if background:
+            with self.scene_lock:
+                self.pending_scenes[scene["camera_id"]] = scene
+                self.motion_event.set()
 
-            try:
-                description = self.vision.describe(
-                    photo_uri,
-                    source=source,
-                    captured_at=captured_at,
-                )
-            except Exception as e:
-                info(f"[VISION] Describe error: {e}")
-                return None
-        if not description:
-            info("[VISION] Got empty description from vision model, skipping")
-            return None
-        scene = {
-            "description": description,
-            "timestamp": captured_at,
-            "request_commit": self.vision.last_request_commit,
-        }
+    def _consume_camera_updates(self):
         with self.scene_lock:
-            self.latest_scene = scene
-        self._record_activity(description, captured_at, source)
-        return scene
+            scenes = list(self.pending_scenes.values())
+            self.pending_scenes.clear()
+            self.motion_event.clear()
+        return "Camera updates:\n" + "\n".join(
+            f"[{s['camera_id']} at {time.strftime('%H:%M:%S', time.localtime(s['timestamp']))}] "
+            f"{s['description']}" for s in scenes
+        )
 
     def _record_activity(self, description: str, captured_at: float, source: str):
-        """Classify and persist a main-camera description without involving the brain."""
+        """Classify and persist a primary-camera description without involving the brain."""
         if not self.activity_store:
             return
         try:
@@ -1234,13 +1177,13 @@ class Orchestrator:
         except Exception as exc:
             info(f"[ACTIVITY] Observation error: {exc}")
 
-    def _save_debug_image(self, jpeg_bytes: bytes):
+    def _save_debug_image(self, jpeg_bytes: bytes, camera_id: str):
         """Save captured image to debug_images/, prune files older than 24h."""
         import os as _os
         import glob as _glob
         debug_dir = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "debug_images")
         _os.makedirs(debug_dir, exist_ok=True)
-        filename = time.strftime("%Y%m%d_%H%M%S") + ".jpg"
+        filename = f"{camera_id}_{time.time_ns()}.jpg"
         try:
             with open(_os.path.join(debug_dir, filename), "wb") as f:
                 f.write(jpeg_bytes)
@@ -1254,82 +1197,6 @@ class Orchestrator:
                     _os.remove(old)
             except Exception:
                 pass
-
-    def _interruptible_sleep(self, seconds):
-        """Sleep for up to `seconds`, checking self.running each second."""
-        for _ in range(int(seconds)):
-            if not self.running:
-                return
-            time.sleep(1)
-
-    def _start_vision_loop(self):
-        from PIL import Image as _Image
-
-        def loop():
-            mode = "chill"
-            last_vision_time = 0.0
-            last_motion_time = 0.0
-            info(f"[VISION] Motion loop started (poll={MOTION_POLL_INTERVAL}s, "
-                 f"vision_cooldown={VISION_POLL_INTERVAL}s, chill_timeout={CHILL_TIMEOUT}s)")
-
-            while self.running:
-                # Fast tier: cheap lores capture for motion detection
-                try:
-                    gray = self.camera.capture_lores()
-                except Exception as e:
-                    info(f"[VISION] Lores capture error: {e}")
-                    self._interruptible_sleep(10)
-                    continue
-
-                pil = _Image.fromarray(gray.astype(int).clip(0, 255).astype('uint8'), mode="L")
-                result = self.scene_detector.check(pil)
-
-                now = time.time()
-
-                if result["changed"]:
-                    last_motion_time = now
-                    self.presence.touch()
-                    info(f"[VISION] Motion detected ({mode}): {result['reason']} "
-                         f"(rms={result['rms']:.1f}, pct={result['pct_changed']:.3f}, "
-                         f"shift={result['shift']})")
-
-                    if mode == "chill":
-                        # First motion after quiet period: immediate capture + notify agent
-                        mode = "active"
-                        self.vision_mode = "active"
-                        info("[VISION] Entering active mode (was chill)")
-                        self._do_vision_capture(notify_agent=True)
-                        last_vision_time = time.time()
-                    elif now - last_vision_time >= VISION_POLL_INTERVAL:
-                        # Active mode but cooldown elapsed: refresh vision
-                        self._do_vision_capture(notify_agent=False)
-                        last_vision_time = time.time()
-                else:
-                    # No motion
-                    if mode == "active" and now - last_motion_time > CHILL_TIMEOUT:
-                        mode = "chill"
-                        self.vision_mode = "chill"
-                        info("[VISION] Entering chill mode (no motion for "
-                             f"{CHILL_TIMEOUT}s)")
-
-                self._interruptible_sleep(MOTION_POLL_INTERVAL)
-
-            info("[VISION] Motion loop stopped")
-
-        t = threading.Thread(target=loop, daemon=True)
-        t.start()
-
-    def _do_vision_capture(self, notify_agent=False):
-        """Full-res capture + vision model describe. Optionally interrupt the agent."""
-        scene = self._capture_and_describe(source="main_camera_background")
-        if not scene:
-            return
-        description = scene["description"]
-        info(f"[VISION] Scene updated: {description[:100]}...")
-
-        if notify_agent:
-            self.motion_description = description
-            self.motion_event.set()
 
     def _tool_update_display(self, args: dict, speak: bool = True) -> dict:
         text = args.get("text", "")
@@ -1406,13 +1273,11 @@ class Orchestrator:
                 return {"status": "interrupted", "reason": "chat_message", "waited": waited}
 
             if self.motion_event.is_set():
-                self.motion_event.clear()
-                self._note_pomodoro_activity()
                 waited = int(time.monotonic() - start)
-                desc = self.motion_description or "Something moved"
-                info(f"[WAIT] Interrupted by motion after {waited}s")
-                return {"status": "interrupted", "reason": "motion_detected", "waited": waited,
-                        "user_message": f"Motion detected in the room! Here's what the camera sees: {desc}"}
+                desc = self._consume_camera_updates()
+                info(f"[WAIT] Interrupted by camera update after {waited}s")
+                return {"status": "interrupted", "reason": "camera_update", "waited": waited,
+                        "user_message": desc}
 
             # In pomodoro mode, if he's gone quiet with no button/chat/motion for
             # the idle window, nudge the agent once to decide (from context) whether
@@ -1951,12 +1816,10 @@ class Orchestrator:
                 self._sweep_chat_queue()
                 return
             if self.motion_event.is_set():
-                self.motion_event.clear()
-                self._note_pomodoro_activity()
-                desc = self.motion_description or "Something moved"
+                desc = self._consume_camera_updates()
                 with self.ctx_lock:
-                    self.ctx.add_user(f"Motion detected in the room! Here's what the camera sees: {desc}")
-                info("[IDLE] Interrupted by motion")
+                    self.ctx.add_user(desc)
+                info("[IDLE] Interrupted by camera update")
                 return
             if ENABLE_DISPLAY:
                 result = http_get("/buttons/state", timeout=2)
@@ -1994,7 +1857,7 @@ class Orchestrator:
             # chat POST to wake an idle agent immediately.
             self.chat_event.wait(1)
         with self.ctx_lock:
-            if ENABLE_CAMERA:
+            if self.cameras.feeds:
                 self.ctx.add_user(
                     "Some time has passed. Use take_photo to see the room, or wait to stay quiet."
                 )
@@ -2056,6 +1919,7 @@ class Orchestrator:
 
     def cleanup(self):
         info("Cleaning up...")
+        self.running = False
         tts_interrupt()
         self.status_publisher.stop()
         with self.ctx_lock:
@@ -2065,8 +1929,7 @@ class Orchestrator:
         except Exception:
             pass
         try:
-            if self.camera:
-                self.camera.close()
+            self.cameras.close()
         except Exception:
             pass
         info("Done.")

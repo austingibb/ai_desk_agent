@@ -83,3 +83,6 @@ class ReoLinkCamera:
         r.raise_for_status()
         data = r.json()
         return isinstance(data, list) and data[0].get("code") == 0
+
+    def close(self):
+        """No persistent connection to release."""

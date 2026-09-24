@@ -85,7 +85,8 @@ class _PiCamera:
 class _OpenCVCamera:
     """Webcam implementation, using AVFoundation on macOS."""
 
-    def __init__(self):
+    def __init__(self, device_index=CAMERA_DEVICE_INDEX):
+        self.device_index = device_index
         try:
             import cv2
         except ImportError as exc:
@@ -96,11 +97,11 @@ class _OpenCVCamera:
         self.cv2 = cv2
         self._lock = threading.Lock()
         api = cv2.CAP_AVFOUNDATION if sys.platform == "darwin" else cv2.CAP_ANY
-        self.cap = cv2.VideoCapture(CAMERA_DEVICE_INDEX, api)
+        self.cap = cv2.VideoCapture(device_index, api)
         if not self.cap.isOpened():
             self.cap.release()
             raise RuntimeError(
-                f"Could not open webcam index {CAMERA_DEVICE_INDEX}. On macOS, "
+                f"Could not open webcam index {self.device_index}. On macOS, "
                 "grant camera access to the terminal or service running AI Roommate."
             )
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
@@ -109,7 +110,7 @@ class _OpenCVCamera:
     def _read_frame(self):
         ok, frame = self.cap.read()
         if not ok or frame is None:
-            raise RuntimeError(f"Could not read webcam index {CAMERA_DEVICE_INDEX}")
+            raise RuntimeError(f"Could not read webcam index {self.device_index}")
         return frame
 
     def capture(self) -> tuple[bytes, str]:
@@ -129,13 +130,14 @@ class _OpenCVCamera:
         self.cap.release()
 
 
-def _select_backend() -> str:
-    if CAMERA_BACKEND not in ("auto", "picamera2", "opencv"):
+def _select_backend(backend=None) -> str:
+    backend = CAMERA_BACKEND if backend is None else backend
+    if backend not in ("auto", "picamera2", "opencv"):
         raise ValueError(
             "CAMERA_BACKEND must be one of: auto, picamera2, opencv"
         )
-    if CAMERA_BACKEND != "auto":
-        return CAMERA_BACKEND
+    if backend != "auto":
+        return backend
     if sys.platform == "darwin":
         return "opencv"
     try:
@@ -148,10 +150,10 @@ def _select_backend() -> str:
 class Camera:
     """Stable camera facade used by the orchestrator on both platforms."""
 
-    def __init__(self):
-        backend = _select_backend()
+    def __init__(self, backend=None, device_index=CAMERA_DEVICE_INDEX):
+        backend = _select_backend(backend)
         self.backend = backend
-        self._impl = _PiCamera() if backend == "picamera2" else _OpenCVCamera()
+        self._impl = _PiCamera() if backend == "picamera2" else _OpenCVCamera(device_index)
 
     def capture(self) -> tuple[bytes, str]:
         return self._impl.capture()

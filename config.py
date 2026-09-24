@@ -1,4 +1,6 @@
 import os
+import json
+import math
 import sys
 import time as _time
 from dotenv import load_dotenv
@@ -188,6 +190,51 @@ CAMERA_ROTATION = int(
 )
 ENABLE_CAMERA = os.environ.get("ENABLE_CAMERA", "1") == "1"
 
+# An explicit registry replaces the two legacy enable flags. Credentials stay in
+# environment variables; arbitrary IDs make additional cameras tool-addressable.
+CAMERAS_JSON = os.environ.get("CAMERAS_JSON", "")
+CAMERA_MODE = os.environ.get("CAMERA_MODE", "cache")
+REOLINK_MODE = os.environ.get("REOLINK_MODE", "cache")
+
+
+def camera_settings(enable_camera=None, enable_reolink=None):
+    local = ENABLE_CAMERA if enable_camera is None else enable_camera
+    reolink = ENABLE_REOLINK if enable_reolink is None else enable_reolink
+    if CAMERAS_JSON:
+        entries = json.loads(CAMERAS_JSON)
+    else:
+        entries = []
+        if local:
+            entries.append({"id": "main_camera", "type": "local", "mode": CAMERA_MODE})
+        if reolink:
+            entries.append({"id": "reolink", "type": "reolink", "mode": REOLINK_MODE})
+    if not isinstance(entries, list):
+        raise ValueError("CAMERAS_JSON must be a JSON array")
+    seen = set()
+    result = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("Each camera must be an object")
+        entry = dict(entry)
+        camera_id = entry.get("id")
+        if (not isinstance(camera_id, str) or not camera_id
+                or not all(c.isascii() and (c.isalnum() or c in "_-") for c in camera_id)):
+            raise ValueError("Camera IDs must contain only letters, digits, '_' or '-'")
+        if camera_id in seen:
+            raise ValueError(f"Duplicate camera ID: {camera_id}")
+        seen.add(camera_id)
+        if entry.get("type") not in {"local", "reolink"}:
+            raise ValueError("Camera type must be local or reolink")
+        entry.setdefault("mode", "cache")
+        if entry["mode"] not in {"cache", "poll_only"}:
+            raise ValueError("Camera mode must be cache or poll_only")
+        entry["interval"] = float(entry.get("interval", VISION_POLL_INTERVAL))
+        if not math.isfinite(entry["interval"]) or entry["interval"] <= 0:
+            raise ValueError("Camera interval must be finite and positive")
+        result.append(entry)
+    return result
+
+
 # Scene change detection — skip vision model when nothing changed
 SCENE_RMS_THRESHOLD = float(os.environ.get("SCENE_RMS_THRESHOLD", "12.0"))
 SCENE_PCT_THRESHOLD = float(os.environ.get("SCENE_PCT_THRESHOLD", "0.05"))
@@ -251,7 +298,7 @@ def build_system_prompt(web_search_available: bool | None = None) -> str:
 
     intro = f"You are a friendly, chatty buddy living on a Raspberry Pi with a camera and {display_intro} in someone's room."
     core_tools = [
-        "- take_photo: Check the room via camera. Returns a text description of the latest cached capture (photos are taken automatically every ~3 min, so the description may be up to 2 min old). Instant — no delay.",
+        "- take_photo: Check the room via camera. Pass camera_id to select a viewpoint. Cache mode returns the latest description and its age immediately; poll_only mode captures on demand (up to 120s).",
         "- capture_photo: Take a NEW photo RIGHT NOW and wait for the vision model to describe it. This is SLOW (up to 120s). Only use when you genuinely need to see what's happening THIS moment — checking if the user actually did what they said, verifying a change you're curious about. For routine awareness, use take_photo.",
         update_display_tool,
         send_chat_tool,
@@ -278,27 +325,33 @@ def build_system_prompt(web_search_available: bool | None = None) -> str:
             "camera harness maintains this log; do not ask the user to update it."
         )
 
+    cameras = camera_settings()
     reolink_tools = []
-    if ENABLE_REOLINK:
+    if any(c["type"] == "reolink" for c in cameras):
         reolink_tools = [
-            "- take_reolink_photo: Capture a snapshot from the Reolink security camera — a second viewpoint at a different angle. Use to corroborate what the main camera sees, or check a part of the room the Pi cam can't see. Slow (vision model describes it, up to 120s).",
+            "- take_reolink_photo: Read the first configured Reolink camera using its cache or poll_only mode. Use capture_photo with its camera_id for a fresh image.",
             "- flash_ir_light: Control the IR (infrared) lights on the Reolink camera. 'Auto' lets the camera decide based on ambient light, 'Off' forces IR off. Optional duration_seconds to auto-revert to Auto.",
             "- flash_camera_light: Control the white LED spotlight on the Reolink camera. Great for waking Austin up in the morning — blast it bright to get his attention. Can also do a quick flash as a signal. Takes optional brightness (0-100) and duration_seconds.",
         ]
 
     toolkit = (
         "take_photo, capture_photo, and take_reolink_photo are tools in your toolkit — use them when they'd add to the conversation, not because you feel obligated. "
-        "take_photo is for quick routine checks (cached, instant). "
+        "take_photo selects a camera by camera_id; cache mode is instant and poll_only mode captures on demand. "
         "capture_photo is for moments when you really need to know what's happening RIGHT NOW — like verifying the user followed through on something. It takes up to 2 minutes, so use it sparingly. "
-        "take_reolink_photo gets a second angle from the security camera — useful for corroboration or checking a blind spot. Also slow. "
+        "take_reolink_photo gets a second angle from the security camera — useful for corroboration or checking a blind spot. Its configured mode determines whether it reads the cache or captures on demand. "
         "flash_camera_light is your alarm — use it to wake Austin up in the morning, ideally as part of a scheduled notification. "
         "Your own musings, jokes, and observations are just as valid. You don't need a photo to have something to say."
     )
 
-    if not ENABLE_CAMERA:
+    if not cameras:
         intro = f"You are a friendly, chatty buddy living on a Raspberry Pi with {display_intro} in someone's room."
         core_tools = core_tools[2:]  # remove take_photo and capture_photo
         toolkit = "Your own musings, jokes, and observations are always valid."
+
+    if cameras:
+        toolkit += " Available cameras: " + ", ".join(
+            f"{c['id']} ({c['mode']}, refresh {c['interval']:g}s)" for c in cameras
+        ) + ". Omitted camera_id selects the first camera."
 
     if web_search_available:
         search_section = (
@@ -522,10 +575,10 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "take_photo",
-            "description": "Check what the room looks like. Returns a text description of the latest camera capture (photos are taken automatically every few minutes). Instant — no delay.",
+            "description": "Read the selected camera. Cache mode returns its latest description and age instantly; poll_only mode captures and describes on demand (up to 120s).",
             "parameters": {
                 "type": "object",
-                "properties": {},
+                "properties": {"camera_id": {"type": "string", "description": "Camera ID from the available cameras in your instructions. Defaults to the first camera."}},
                 "required": [],
             },
         },
@@ -537,7 +590,7 @@ TOOL_DEFINITIONS = [
             "description": "Take a NEW photo RIGHT NOW and wait for the vision model to describe it. This is SLOW (up to 120s) — only use when you genuinely need to see what's happening this moment (e.g., checking if the user did what they said they'd do, verifying a change you're curious about). For routine awareness, use take_photo instead.",
             "parameters": {
                 "type": "object",
-                "properties": {},
+                "properties": {"camera_id": {"type": "string", "description": "Camera ID from the available cameras in your instructions. Defaults to the first camera."}},
                 "required": [],
             },
         },
@@ -887,7 +940,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "take_reolink_photo",
-            "description": "Capture a snapshot from the Reolink security camera (second viewpoint, different angle from the main Pi camera). Use to corroborate what the main camera sees, verify details from a different angle, or check a part of the room the Pi cam can't see. Blocks while the vision model describes it (up to 120s).",
+            "description": "Read the first configured Reolink camera. Cache mode returns its latest description immediately; poll_only captures on demand. Use capture_photo with camera_id for a fresh capture.",
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -956,9 +1009,10 @@ AUXILIARY_FORBIDDEN_TOOL_NAMES = (
 
 def get_tool_definitions() -> list:
     result = list(TOOL_DEFINITIONS)
-    if not ENABLE_CAMERA:
+    cameras = camera_settings()
+    if not cameras:
         result = [t for t in result if t["function"]["name"] not in CAMERA_TOOL_NAMES]
-    if not ENABLE_REOLINK:
+    if not any(c["type"] == "reolink" for c in cameras):
         result = [t for t in result if t["function"]["name"] not in REOLINK_TOOL_NAMES]
     if NOTIFICATION_APPROVAL_MODE != "smart":
         result = [

@@ -19,6 +19,7 @@ Orchestrator (main.py): Pi 5, or any single machine in chat-only mode
 ├── context.py        → message store, timestamps, compaction, pairing repair
 ├── chat_media.py     → user image validation + multimodal content construction
 ├── camera.py         → capture backend: picamera2 on Pi, OpenCV/AVFoundation on macOS
+├── camera_manager.py → per-camera caches, background workers, shared inference lock
 ├── scene_change.py   → motion detection via phase correlation (Pillow + numpy)
 ├── vision_history.py → nested-git prompt history + JSONL description log
 ├── reolink.py        → optional network security camera (snapshot, IR, spotlight)
@@ -55,7 +56,8 @@ It chunks `context.json` and asks the brain to report mistakes and improvements.
 - **Vision** (`VISION_MODEL`, local). Describes room-camera frames. Nothing else.
 
 The brain reaches the room through `take_photo`, which returns the cached
-description from the background vision thread with no round trip. `capture_photo`
+description from the selected feed with no round trip in cache mode (or captures
+on demand in poll_only mode). `capture_photo`
 takes a fresh frame and blocks on the vision model (up to `VISION_TIMEOUT`); it
 exists for moments that genuinely need current information and should stay rare.
 
@@ -97,21 +99,24 @@ on user interaction.
 
 ## Background vision loop
 
-A daemon thread (`_start_vision_loop`) with two tiers. Motion drives everything;
-there is no unconditional capture timer.
+`CameraManager` in `camera_manager.py` owns a registry of `CameraFeed`s. Each
+`cache` feed has its own background worker, latest JPEG, and description. A
+`poll_only` feed captures only on tool request and retains no cache. Configuration
+comes from `CAMERAS_JSON`, or the legacy enable flags plus `CAMERA_MODE` and
+`REOLINK_MODE` (both default to `cache`). See README for registry fields.
 
-1. Every `MOTION_POLL_INTERVAL` (2s), grab a cheap lores frame and run
-   `scene_change.check()` (phase correlation, so panning doesn't read as motion)
-2. Motion touches `presence` and, in `chill` mode, immediately captures and
-   notifies the agent. In `active` mode it captures only if `VISION_POLL_INTERVAL`
-   has elapsed since the last one, so the interval is a cooldown, not a schedule
-3. `_do_vision_capture()` describes via `VisionClient.describe()`, retrying up to
-   3 times on empty output (the vision model intermittently returns nothing)
-4. Cache into `self.latest_scene` under `scene_lock`
-5. Classify and persist the current AK/AFK activity, then publish it over chat SSE
-6. Append to the description log, save a debug JPEG (24h rolling window)
-7. `CHILL_TIMEOUT` (300s) with no motion drops back to `chill`, where no frames are
-   described at all until something moves
+Each cached feed refreshes at its interval, even without motion. Devices offering
+`capture_lores` also use scene detection to trigger an earlier refresh after a
+quiet period and touch presence. All capture + inference jobs share one lock so
+request metadata stays with its image. Successful background descriptions are
+queued by camera ID and wake the agent; multiple viewpoints cannot overwrite one
+another. Failures preserve the last good cache. The first configured camera feeds
+the activity timeline. Debug JPEGs include camera IDs and are retained for 24h.
+
+`take_photo(camera_id)` reads a cache or polls according to mode;
+`capture_photo(camera_id)` always captures fresh. Both default to the first
+camera. `take_reolink_photo` aliases the first Reolink feed. Vision initializes
+for any configured camera, including Reolink-only setups.
 
 ## Key files
 
